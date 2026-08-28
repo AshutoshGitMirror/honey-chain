@@ -1,0 +1,48 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Data flow - Honey Chain</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:1100px;margin:0 auto;padding:20px;background:#fff;color:#222}
+h1{margin:0 0 8px} .note{color:#666;font-size:13px}
+.mermaid{border:1px solid #eee;border-radius:12px;padding:16px;background:#fafafa}
+</style></head><body>
+<h1>Honey Chain — how data moves, with one hash link</h1>
+<p class="note">Less jargon: one harvest, one hash, one QR at the farm. After that we add notes that link to the first hash. KVIC network adds to it, no one rewrites it.</p>
+<pre class="mermaid">
+flowchart TD
+  A[Household farm - 10 boxes
+  village, flower, date
+  makes one hash] --> B[QR at field
+  hash is fingerprint
+  prev_hash links to last harvest]
+
+  B --> C[Cooperative pickup
+  notes who, when, weight
+  links to QR]
+
+  C --> D[Processing plant
+  van at doorstep, 300kg in 8h
+  heats 60-65C and filters]
+
+  D --> E[Lab at NABL
+  15 tests, adds cert PDF
+  and CA number]
+
+  E --> F[Authorized packer
+  writes label after lab
+  AGMARK + lot + MRP]
+
+  F --> G[KVIC Bhavan shop
+  puts bottle on shelf]
+
+  G --> H[Consumer at shop
+  scans QR, sees household, flower,
+  google map of farm, cert badge]
+
+  H -. verify hash chain .-> B
+
+  style A fill:#fff2cc,stroke:#d9a500,stroke-width:2px
+  style B fill:#e6f4ea,stroke:#2e7d32,stroke-width:2px
+  style H fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+</pre>
+<p class="note">Flexible: if we pool many households for one plant run, the plant lot lists many field hashes. Label is written after the lab, not before. Household pin is everywhere, same coords for customer and KVIC.</p>
+<script>mermaid.initialize({startOnLoad:true})</script>
+</body></html>
