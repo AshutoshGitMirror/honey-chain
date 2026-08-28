@@ -8,6 +8,7 @@ import hashlib
 import json
 import sqlite3
 import os
+import secrets
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
@@ -39,6 +40,15 @@ def init_db():
         for col, typ in [("photo_url","TEXT"),("collective_name","TEXT"),("latitude","REAL"),("longitude","REAL"),("site_people","TEXT")]:
             if not column_exists(con, "beekeeper", col):
                 con.execute(f"ALTER TABLE beekeeper ADD COLUMN {col} {typ}")
+        for col, typ in [("scan_secret","TEXT")]:
+            if not column_exists(con, "batch", col):
+                con.execute(f"ALTER TABLE batch ADD COLUMN {col} {typ}")
+        for col, typ in [("scan_secret","TEXT")]:
+            if not column_exists(con, "rating", col):
+                # if old rating had consumer_id unique, keep it but add scan_secret
+                try:
+                    con.execute(f"ALTER TABLE rating ADD COLUMN {col} {typ}")
+                except: pass
         con.commit()
     # seed if empty
     cnt = con.execute("SELECT COUNT(*) as c FROM beekeeper").fetchone()["c"]
@@ -180,7 +190,7 @@ def render_home():
 </div>
 """ + HTML_FOOT
 
-def render_verify(hash_val):
+def render_verify(hash_val, scan_token=None):
     res = verify_chain(hash_val)
     con = db()
     batch = con.execute("SELECT b.*, k.name, k.village, k.experience_years, k.bio, k.upi_id, k.rating_avg, k.rating_count, k.photo_url, k.collective_name, k.latitude, k.longitude, k.site_people FROM batch b JOIN beekeeper k ON k.id=b.beekeeper_id WHERE b.hash=?", (hash_val,)).fetchone()
@@ -189,17 +199,35 @@ def render_verify(hash_val):
         return HTML_HEAD + f'<div class="card bad"><h2>Not found</h2><p>No batch with that hash.</p><pre>{hash_val}</pre></div>' + HTML_FOOT
     status = '<span class="ok">Chain intact</span>' if res["valid"] else '<span class="bad">Chain broken</span>'
     chain_pre = json.dumps([{"hash": c.get("hash"), "prev": c.get("prev_hash"), "hive": c.get("hive_id"), "date": c.get("harvest_date")} for c in res["chain"]], indent=2)
-    rating_block = f'''
-<div class="card">
-<h3>Rate this beekeeper</h3>
+    # rating via scan token to prevent gaming
+    # batch scan_secret is stored, QR contains ?s=token, rating needs that token, one rating per batch per token
+    batch_secret = batch["scan_secret"]
+    has_valid_token = scan_token and batch_secret and scan_token == batch_secret
+    # if batch has no secret (old data), allow legacy
+    if not batch_secret:
+        has_valid_token = True
+        token_note = "<small>Legacy batch without scan token, rating allowed.</small>"
+    elif has_valid_token:
+        token_note = "<small>Valid scan, you can rate once. Token is single use per batch.</small>"
+    else:
+        token_note = "<small>Scan the QR on the bottle to get a valid link with token. Rating needs the scan token to prevent bots. Add ?s=token to the URL.</small>"
+    if has_valid_token:
+        rating_form = f'''
 <form method="POST" action="/api/rate">
 <input type="hidden" name="batch_hash" value="{hash_val}">
 <input type="hidden" name="beekeeper_id" value="{batch["beekeeper_id"]}">
-<label>Your device ID<input name="consumer_id" required placeholder="phone last 4 or any id"></label>
+<input type="hidden" name="scan_secret" value="{scan_token or ''}">
 <label>Stars<select name="stars"><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select></label>
 <button type="submit">Submit rating</button>
 </form>
-<small>One rating per batch per consumer.</small>
+'''
+    else:
+        rating_form = "<p><em>Rating locked. Scan the QR with token.</em></p>"
+    rating_block = f'''
+<div class="card">
+<h3>Rate this beekeeper</h3>
+{rating_form}
+{token_note}
 </div>
 '''
     upi = batch["upi_id"]
@@ -228,13 +256,16 @@ def render_verify(hash_val):
     photo = batch["photo_url"]
     photo_tag = f'<img class="avatar" src="{photo}" onerror="this.style.display=\'none\'">' if photo else ""
     collective = batch["collective_name"] or "-"
+    qr_token = batch["scan_secret"]
+    qr_js = f"new QRCode(document.getElementById('qrcode'), {{text: window.location.origin + '/verify/{hash_val}?s={qr_token}', width: 160, height: 160}});" if qr_token else "new QRCode(document.getElementById('qrcode'), {text: window.location.href, width: 160, height: 160});"
     return HTML_HEAD + f"""
 <h2>Verify</h2>
 <div class="card">
 <div>Hash: <pre>{hash_val}</pre></div>
 <div>Status: {status}</div>
+<div>Scan token: <small>{qr_token or 'legacy - no token'}</small></div>
 <div id="qrcode" style="margin-top:12px"></div>
-<script>new QRCode(document.getElementById("qrcode"), {{text: window.location.href, width: 160, height: 160}});</script>
+<script>{qr_js}</script>
 </div>
 <div class="card">
 <h3>Batch</h3>
@@ -488,8 +519,10 @@ class Handler(BaseHTTPRequestHandler):
             except:
                 self.send_error(404)
         elif path.startswith("/verify/"):
-            h = path.split("/verify/")[1].strip()
-            self.send_html(render_verify(h))
+            h = path.split("/verify/")[1].strip().split("?")[0].split("#")[0]
+            qs = urllib.parse.parse_qs(parsed.query)
+            s = qs.get("s", [None])[0]
+            self.send_html(render_verify(h, s))
         elif path == "/api/batches":
             con = db()
             rows = [dict(r) for r in con.execute("SELECT * FROM batch ORDER BY id DESC").fetchall()]
@@ -548,11 +581,12 @@ class Handler(BaseHTTPRequestHandler):
             honey_type = d.get("honey_type") or ""
             location = d.get("location") or ""
             h = batch_hash(prev, beekeeper_id, hive_id, harvest_date, flower, honey_type, location)
+            scan_secret = secrets.token_hex(8)
             try:
-                con.execute("INSERT INTO batch (beekeeper_id, hive_id, harvest_date, location, honey_type, flower_source, horticulture_notes, harvest_method, weight_kg, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                            (beekeeper_id, hive_id, harvest_date, location, honey_type, flower, d.get("horticulture_notes"), d.get("harvest_method"), float(d.get("weight_kg") or 0) or None, prev, h))
+                con.execute("INSERT INTO batch (beekeeper_id, hive_id, harvest_date, location, honey_type, flower_source, horticulture_notes, harvest_method, weight_kg, prev_hash, hash, scan_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (beekeeper_id, hive_id, harvest_date, location, honey_type, flower, d.get("horticulture_notes"), d.get("harvest_method"), float(d.get("weight_kg") or 0) or None, prev, h, scan_secret))
                 con.commit(); con.close()
-                self.redirect(f"/verify/{h}")
+                self.redirect(f"/verify/{h}?s={scan_secret}")
             except sqlite3.IntegrityError as e:
                 con.close()
                 self.send_html(HTML_HEAD + f"<p>Duplicate hash or error: {e}</p><pre>{h}</pre>" + HTML_FOOT)
@@ -578,15 +612,33 @@ class Handler(BaseHTTPRequestHandler):
             con = db()
             try:
                 stars = int(d.get("stars"))
-                con.execute("INSERT INTO rating (beekeeper_id, batch_hash, consumer_id, stars) VALUES (?,?,?,?)",
-                            (int(d.get("beekeeper_id")), d.get("batch_hash"), d.get("consumer_id"), stars))
+                b_hash = d.get("batch_hash")
+                scan_secret = d.get("scan_secret")
+                # verify scan_secret matches batch if batch has one
+                brow = con.execute("SELECT scan_secret FROM batch WHERE hash=?", (b_hash,)).fetchone()
+                if brow and brow["scan_secret"]:
+                    if scan_secret != brow["scan_secret"]:
+                        con.close()
+                        self.send_html(HTML_HEAD + "<p>Rating needs a valid scan token from the QR. Scan the QR with ?s=token.</p><a href='/'>back</a>" + HTML_FOOT)
+                        return
+                # prevent reuse of same token for same batch
+                if scan_secret:
+                    exists = con.execute("SELECT 1 FROM rating WHERE batch_hash=? AND scan_secret=?", (b_hash, scan_secret)).fetchone()
+                    if exists:
+                        con.close()
+                        self.send_html(HTML_HEAD + "<p>This QR has already been used to rate this batch. One rating per scan.</p><a href='/'>back</a>" + HTML_FOOT)
+                        return
+                con.execute("INSERT INTO rating (beekeeper_id, batch_hash, scan_secret, consumer_id, stars) VALUES (?,?,?,?,?)",
+                            (int(d.get("beekeeper_id")), b_hash, scan_secret, d.get("consumer_id"), stars))
                 avg = con.execute("SELECT AVG(stars) as a, COUNT(*) as c FROM rating WHERE beekeeper_id=?", (int(d.get("beekeeper_id")),)).fetchone()
                 con.execute("UPDATE beekeeper SET rating_avg=?, rating_count=? WHERE id=?", (avg["a"], avg["c"], int(d.get("beekeeper_id"))))
                 con.commit(); con.close()
-                self.redirect(f"/verify/{d.get('batch_hash')}")
+                # keep token in redirect so QR stays valid
+                qs = f"?s={scan_secret}" if scan_secret else ""
+                self.redirect(f"/verify/{b_hash}{qs}")
             except sqlite3.IntegrityError:
                 con.close()
-                self.send_html(HTML_HEAD + "<p>You already rated this batch with that consumer ID.</p><a href='/'>back</a>" + HTML_FOOT)
+                self.send_html(HTML_HEAD + "<p>You already rated this batch with that scan token.</p><a href='/'>back</a>" + HTML_FOOT)
         else:
             self.send_error(404)
 

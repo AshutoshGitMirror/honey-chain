@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS batch (
   weight_kg REAL,
   prev_hash TEXT,
   hash TEXT UNIQUE NOT NULL,
+  scan_secret TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -39,10 +40,11 @@ CREATE TABLE IF NOT EXISTS rating (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   beekeeper_id INTEGER NOT NULL REFERENCES beekeeper(id),
   batch_hash TEXT NOT NULL REFERENCES batch(hash),
-  consumer_id TEXT NOT NULL,
+  scan_secret TEXT,
+  consumer_id TEXT,
   stars INTEGER CHECK(stars BETWEEN 1 AND 5),
   created_at TEXT DEFAULT (datetime('now')),
-  UNIQUE(batch_hash, consumer_id)
+  UNIQUE(batch_hash, scan_secret)
 );
 
 CREATE TABLE IF NOT EXISTS hive_reading (
