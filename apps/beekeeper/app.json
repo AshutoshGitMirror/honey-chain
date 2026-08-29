@@ -25,9 +25,6 @@
           "locationAlwaysAndWhenInUsePermission": "Allow beekeeper to pin household location"
         }
       ]
-    ],
-    "experiments": {
-      "typedRoutes": true
-    }
+    ]
   }
 }
