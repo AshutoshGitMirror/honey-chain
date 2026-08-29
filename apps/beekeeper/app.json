@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "beekeeper",
+    "slug": "beekeeper",
+    "version": "0.1.0",
+    "scheme": "beekeeper",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "platforms": ["ios", "android", "web"],
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow beekeeper to scan QR on honey jars"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow beekeeper to pin household location"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

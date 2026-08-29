@@ -40,12 +40,11 @@ def init_db():
         for col, typ in [("photo_url","TEXT"),("collective_name","TEXT"),("latitude","REAL"),("longitude","REAL"),("site_people","TEXT")]:
             if not column_exists(con, "beekeeper", col):
                 con.execute(f"ALTER TABLE beekeeper ADD COLUMN {col} {typ}")
-        for col, typ in [("scan_secret","TEXT")]:
+        for col, typ in [("scan_secret","TEXT"),("packer_name","TEXT"),("ca_number","TEXT"),("packing_date","TEXT"),("best_before","TEXT"),("lot_number","TEXT"),("mrp","REAL"),("net_weight","REAL")]:
             if not column_exists(con, "batch", col):
                 con.execute(f"ALTER TABLE batch ADD COLUMN {col} {typ}")
         for col, typ in [("scan_secret","TEXT")]:
             if not column_exists(con, "rating", col):
-                # if old rating had consumer_id unique, keep it but add scan_secret
                 try:
                     con.execute(f"ALTER TABLE rating ADD COLUMN {col} {typ}")
                 except: pass
@@ -67,6 +66,12 @@ def sha256(s: str) -> str:
 
 def batch_hash(prev, beekeeper_id, hive_id, harvest_date, flower_source, honey_type, location):
     raw = f"{prev or ''}|{beekeeper_id}|{hive_id}|{harvest_date}|{flower_source}|{honey_type}|{location}"
+    return sha256(raw)
+
+def pooled_hash(prev_hashes, plant_name, plant_date):
+    # prev_hashes is list of strings, sort for determinism
+    joined = "|".join(sorted(prev_hashes))
+    raw = f"{joined}|{plant_name}|{plant_date}"
     return sha256(raw)
 
 def verify_chain(target_hash):
@@ -137,7 +142,7 @@ pre{white-space:pre-wrap;word-break:break-all;background:#fafafa;padding:10px;bo
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head><body>
 <header><div><h1 style="margin:0">Honey Chain</h1><small>KVIC prototype — hash chain + QR + hive check + map</small></div>
-<nav><a href="/">Home</a> <a href="/promotion">Promotion</a> <a href="/beekeeper">Beekeepers</a> <a href="/collectives">Collectives</a></nav></header><hr>
+<nav><a href="/">Home</a> <a href="/promotion">Promotion</a> <a href="/beekeeper">Beekeepers</a> <a href="/collectives">Collectives</a> <a href="/pooled">Pooled lots</a></nav></header><hr>
 """
 
 HTML_FOOT = "<hr><small>Prototype. SQLite + hash chain + OSM. Replace hash with real chain when KVIC needs it.</small></body></html>"
@@ -242,15 +247,17 @@ def render_verify(hash_val, scan_token=None):
 <a href="upi://pay?pa={urllib.parse.quote(upi)}&pn={urllib.parse.quote(batch['name'])}&cu=INR"><button>Pay via UPI app</button></a></div>
 </div>
 '''
-    # map for verify if coords exist
+    # map for verify if coords exist - household pin everywhere, with google embed as requested
     map_block = ""
     if batch["latitude"] and batch["longitude"]:
         map_block = f'''
 <div class="card">
 <h3>Location — {batch["collective_name"] or batch["village"]}</h3>
+<p><small>Household farm — home address for visit. Same pin for customer and KVIC.</small></p>
 <div id="map"></div>
-<script>var m=L.map('map').setView([{batch["latitude"]},{batch["longitude"]}],13); L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19, attribution:'OSM'}}).addTo(m); L.marker([{batch["latitude"]},{batch["longitude"]}]).addTo(m).bindPopup("{batch["name"]}");</script>
-<small>{batch["latitude"]}, {batch["longitude"]}</small>
+<script>var m=L.map('map').setView([{batch["latitude"]},{batch["longitude"]}],13); L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19, attribution:'OSM'}}).addTo(m); L.marker([{batch["latitude"]},{batch["longitude"]}]).addTo(m).bindPopup("{batch["name"]} — household");</script>
+<iframe width="100%" height="280" style="border:0; border-radius:12px; margin-top:10px" loading="lazy" src="https://www.google.com/maps?q={batch["latitude"]},{batch["longitude"]}&z=15&output=embed"></iframe>
+<small>{batch["latitude"]}, {batch["longitude"]} — household farm</small>
 </div>
 '''
     photo = batch["photo_url"]
@@ -355,10 +362,10 @@ def render_beekeeper_one(bid):
         collective_html = "<ul>" + "".join(f'<li><a href="/beekeeper/{m["id"]}">{m["name"]}</a> — {m["village"]} ({m["experience_years"]} yrs) {"<span class=badge>lead</span>" if m["id"]==r["id"] else ""}</li>' for m in collective_members) + "</ul>"
     else:
         collective_html = "<p>Only this beekeeper in collective. Add others with same collective name.</p>"
-    # map
+    # map - household pin everywhere
     map_html = ""
     if r["latitude"] and r["longitude"]:
-        map_html = f'<div id="map"></div><script>var m=L.map("map").setView([{r["latitude"]},{r["longitude"]}],13); L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",{{maxZoom:19, attribution:"OSM"}}).addTo(m); L.marker([{r["latitude"]},{r["longitude"]}]).addTo(m).bindPopup("{r["name"]} — {r["collective_name"] or ""}");</script><small>{r["latitude"]}, {r["longitude"]}</small>'
+        map_html = f'<div id="map"></div><script>var m=L.map("map").setView([{r["latitude"]},{r["longitude"]}],13); L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",{{maxZoom:19, attribution:"OSM"}}).addTo(m); L.marker([{r["latitude"]},{r["longitude"]}]).addTo(m).bindPopup("{r["name"]} — household farm");</script><iframe width="100%" height="280" style="border:0; border-radius:12px; margin-top:10px" loading="lazy" src="https://www.google.com/maps?q={r["latitude"]},{r["longitude"]}&z=15&output=embed"></iframe><small>{r["latitude"]}, {r["longitude"]} — household farm, same for customer and KVIC</small>'
     else:
         map_html = "<p>No location set. Add latitude and longitude.</p>"
     # collective name badge
@@ -462,12 +469,13 @@ def render_collective_one(name):
     all_people = list(dict.fromkeys([p for p in all_people if p]))
     # map with multiple markers
     markers_js = "\n".join(f'L.marker([{m["latitude"]},{m["longitude"]}]).addTo(m).bindPopup("{m["name"]}");' for m in members if m["latitude"] and m["longitude"])
-    # center
+    # center - household pin everywhere
     lats = [m["latitude"] for m in members if m["latitude"]]
     lngs = [m["longitude"] for m in members if m["longitude"]]
     if lats:
         center = f"[{sum(lats)/len(lats)},{sum(lngs)/len(lngs)}]"
-        map_html = f'<div id="map"></div><script>var m=L.map("map").setView({center},12); L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",{{maxZoom:19, attribution:"OSM"}}).addTo(m); {markers_js}</script>'
+        glat = sum(lats)/len(lats); glon = sum(lngs)/len(lngs)
+        map_html = f'<div id="map"></div><script>var m=L.map("map").setView({center},12); L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",{{maxZoom:19, attribution:"OSM"}}).addTo(m); {markers_js}</script><iframe width="100%" height="280" style="border:0; border-radius:12px; margin-top:10px" loading="lazy" src="https://www.google.com/maps?q={glat},{glon}&z=13&output=embed"></iframe><small>Household farms — same pins for customer and KVIC</small>'
     else:
         map_html = "<p>No coords for this collective.</p>"
     batches = con.execute("SELECT b.*, k.name FROM batch b JOIN beekeeper k ON k.id=b.beekeeper_id WHERE k.collective_name=? ORDER BY b.id DESC LIMIT 20", (name,)).fetchall()
@@ -497,6 +505,79 @@ def render_collective_one(name):
 <div class="card"><h3>Recent batches from this site</h3>{batch_html}</div>
 """ + HTML_FOOT
 
+def render_pooled():
+    con = db()
+    lots = con.execute("SELECT * FROM pooled_lot ORDER BY id DESC").fetchall()
+    batches = con.execute("SELECT hash, flower_source, harvest_date, beekeeper_id FROM batch ORDER BY id DESC LIMIT 50").fetchall()
+    con.close()
+    # options for 5 hashes
+    opts = "".join(f'<option value="{b["hash"]}">{b["hash"][:10]} — {b["flower_source"] or "?"} — {b["harvest_date"]}</option>' for b in batches)
+    lots_html = ""
+    for lot in lots:
+        try:
+            prevs = json.loads(lot["prev_hashes"])
+        except:
+            prevs = [lot["prev_hashes"]]
+        lots_html += f'<div class="card"><h3 style="margin:0">Pooled lot {lot["pooled_hash"][:10]}... <span class="badge">{lot["plant_name"] or "plant"}</span></h3><div>Plant: {lot["plant_name"] or "-"} — {lot["plant_date"]} — {lot["weight_kg"] or "-"} kg</div><div>From {len(prevs)} field hashes:</div><ul>' + "".join(f'<li><a href="/verify/{h}">{h[:10]}...</a> (<a href="/pooled/{lot["pooled_hash"]}?s={lot["scan_secret"] or ""}">{lot["pooled_hash"][:10]} lot</a>)</li>' for h in prevs[:5]) + f'</ul><div><a href="/pooled/{lot["pooled_hash"]}">Open lot</a> | <a href="/verify/{lot["pooled_hash"]}?s={lot["scan_secret"] or ""}">Verify lot QR</a></div></div>'
+    if not lots_html:
+        lots_html = "<p>No pooled lots yet. Coop can pool 5 field harvests for one plant run.</p>"
+    form = f'''
+<div class="card">
+<h3>Create pooled lot — coop at plant</h3>
+<p><small>Pick 5 field hashes from same flower and date, coop operator creates one pooled lot. Households need not be at plant.</small></p>
+<form method="POST" action="/api/pooled">
+<div class="grid">
+<div><label>Plant name<input name="plant_name" placeholder="Ramnagar or Mobile Van"></label></div>
+<div><label>Plant date<input type="date" name="plant_date" value="{datetime.now().date()}" required></label></div>
+<div><label>Weight kg<input type="number" step="0.1" name="weight_kg" placeholder="300"></label></div>
+<div><label>Flower filter<small> optional</small><input name="flower" placeholder="mustard"></label></div>
+</div>
+<label>Pick 5 field hashes (hold Ctrl) <select name="prev_hashes" multiple size="6" required>{opts}</select></label>
+<small>One pooled lot lists 5 field hashes. Hash = SHA256(sorted hashes + plant + date). Rating uses pooled QR token.</small>
+<button type="submit">Pool and make lot QR</button>
+</form>
+</div>
+'''
+    return HTML_HEAD + f"<h2>Pooled lots — where 5 histories meet</h2><p>Coop pools 5 household harvests for one 300 kg plant run. Each field hash is already frozen, pooled lot links to them as a DAG.</p>{form}{lots_html}" + HTML_FOOT
+
+def render_pooled_one(pooled_hash, scan_token=None):
+    con = db()
+    lot = con.execute("SELECT * FROM pooled_lot WHERE pooled_hash=?", (pooled_hash,)).fetchone()
+    if not lot:
+        # maybe it is a batch hash, fall back to verify
+        con.close()
+        return render_verify(pooled_hash, scan_token)
+    try:
+        prevs = json.loads(lot["prev_hashes"])
+    except:
+        prevs = [lot["prev_hashes"]]
+    # get field batches
+    placeholders = ",".join(["?"]*len(prevs))
+    fields = con.execute(f"SELECT b.*, k.name, k.village FROM batch b JOIN beekeeper k ON k.id=b.beekeeper_id WHERE b.hash IN ({placeholders})", prevs).fetchall() if prevs else []
+    con.close()
+    field_list = "".join(f'<li><a href="/verify/{f["hash"]}?s={f["scan_secret"] or ""}">{f["hash"][:10]} — {f["name"]} — {f["flower_source"]} — {f["harvest_date"]}</a></li>' for f in fields) or "".join(f"<li>{h[:10]}...</li>" for h in prevs)
+    has_valid = scan_token and lot["scan_secret"] and scan_token == lot["scan_secret"]
+    note = "<span class='ok'>Valid scan token — you can rate this pooled lot once.</span>" if has_valid else "<small>Scan the pooled QR with ?s=token to rate. One rating per pooled QR.</small>"
+    rating = f'''
+<div class="card"><h3>Rate this pooled lot</h3>
+{'<form method="POST" action="/api/rate_pooled"><input type="hidden" name="pooled_hash" value="'+pooled_hash+'"><input type="hidden" name="scan_secret" value="'+(scan_token or '')+'"><label>Stars<select name="stars"><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select></label><button type="submit">Rate pooled lot</button></form>' if has_valid else '<p><em>Rating locked. Scan pooled QR.</em></p>'}
+{note}
+</div>
+'''
+    qr_js = f"new QRCode(document.getElementById('qrcode'), {{text: window.location.origin + '/pooled/{pooled_hash}?s={lot['scan_secret']}', width: 160, height: 160}});" if lot["scan_secret"] else "new QRCode(document.getElementById('qrcode'), {text: window.location.href, width: 160, height: 160});"
+    return HTML_HEAD + f"""
+<h2>Pooled lot</h2>
+<div class="card">
+<div>Pooled hash: <pre>{pooled_hash}</pre></div>
+<div>Plant: {lot["plant_name"] or "-"} — {lot["plant_date"]} — {lot["weight_kg"] or "-"} kg</div>
+<div>Scan token: <small>{lot["scan_secret"] or "legacy"}</small></div>
+<div id="qrcode" style="margin-top:12px"></div>
+<script>{qr_js}</script>
+</div>
+<div class="card"><h3>From 5 field harvests</h3><ul>{field_list}</ul></div>
+{rating}
+""" + HTML_FOOT
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -518,6 +599,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(render_beekeeper_one(bid))
             except:
                 self.send_error(404)
+        elif path == "/pooled":
+            self.send_html(render_pooled())
+        elif path.startswith("/pooled/"):
+            h = path.split("/pooled/")[1].strip().split("?")[0].split("#")[0]
+            qs = urllib.parse.parse_qs(parsed.query)
+            s = qs.get("s", [None])[0]
+            self.send_html(render_pooled_one(h, s))
         elif path.startswith("/verify/"):
             h = path.split("/verify/")[1].strip().split("?")[0].split("#")[0]
             qs = urllib.parse.parse_qs(parsed.query)
@@ -639,6 +727,67 @@ class Handler(BaseHTTPRequestHandler):
             except sqlite3.IntegrityError:
                 con.close()
                 self.send_html(HTML_HEAD + "<p>You already rated this batch with that scan token.</p><a href='/'>back</a>" + HTML_FOOT)
+        elif path == "/api/pooled":
+            con = db()
+            try:
+                plant_name = d.get("plant_name") or "Plant"
+                plant_date = d.get("plant_date") or datetime.now().date().isoformat()
+                weight = float(d.get("weight_kg") or 0) or None
+                prevs = data.get("prev_hashes", [])
+                if isinstance(prevs, str):
+                    prevs = [prevs]
+                if len(prevs)==1 and "," in prevs[0]:
+                    prevs = [p.strip() for p in prevs[0].split(",") if p.strip()]
+                if len(prevs) < 1:
+                    con.close()
+                    self.send_html(HTML_HEAD + "<p>Pick at least one field hash to pool.</p><a href='/pooled'>back</a>" + HTML_FOOT)
+                    return
+                phash = pooled_hash(prevs, plant_name, plant_date)
+                scan_secret = secrets.token_hex(8)
+                con.execute("INSERT INTO pooled_lot (plant_name, plant_date, pooled_hash, prev_hashes, weight_kg, scan_secret) VALUES (?,?,?,?,?,?)",
+                            (plant_name, plant_date, phash, json.dumps(prevs), weight, scan_secret))
+                con.commit(); con.close()
+                self.redirect(f"/pooled/{phash}?s={scan_secret}")
+            except Exception as e:
+                con.close()
+                self.send_html(HTML_HEAD + f"<p>Pool error: {e}</p><a href='/pooled'>back</a>" + HTML_FOOT)
+        elif path == "/api/rate_pooled":
+            con = db()
+            try:
+                stars = int(d.get("stars"))
+                phash = d.get("pooled_hash")
+                scan_secret = d.get("scan_secret")
+                brow = con.execute("SELECT scan_secret FROM pooled_lot WHERE pooled_hash=?", (phash,)).fetchone()
+                if brow and brow["scan_secret"] and scan_secret != brow["scan_secret"]:
+                    con.close()
+                    self.send_html(HTML_HEAD + "<p>Rating needs valid pooled scan token.</p><a href='/pooled'>back</a>" + HTML_FOOT)
+                    return
+                # simple check for reuse
+                exists = con.execute("SELECT 1 FROM rating WHERE batch_hash=? AND scan_secret=?", (phash, scan_secret)).fetchone() if scan_secret else None
+                if exists:
+                    con.close()
+                    self.send_html(HTML_HEAD + "<p>This pooled QR already used to rate.</p><a href='/pooled'>back</a>" + HTML_FOOT)
+                    return
+                # find a beekeeper for rating aggregation - use first field's beekeeper or plant
+                # for now use first field's beekeeper or 1
+                first = None
+                try:
+                    prevs = json.loads(con.execute("SELECT prev_hashes FROM pooled_lot WHERE pooled_hash=?", (phash,)).fetchone()["prev_hashes"])
+                    if prevs:
+                        first = con.execute("SELECT beekeeper_id FROM batch WHERE hash=?", (prevs[0],)).fetchone()
+                except:
+                    pass
+                bid = first["beekeeper_id"] if first else 1
+                con.execute("INSERT INTO rating (beekeeper_id, batch_hash, scan_secret, stars) VALUES (?,?,?,?)",
+                            (bid, phash, scan_secret, stars))
+                avg = con.execute("SELECT AVG(stars) as a, COUNT(*) as c FROM rating WHERE beekeeper_id=?", (bid,)).fetchone()
+                con.execute("UPDATE beekeeper SET rating_avg=?, rating_count=? WHERE id=?", (avg["a"], avg["c"], bid))
+                con.commit(); con.close()
+                qs = f"?s={scan_secret}" if scan_secret else ""
+                self.redirect(f"/pooled/{phash}{qs}")
+            except Exception as e:
+                con.close()
+                self.send_html(HTML_HEAD + f"<p>Rate pooled error: {e}</p><a href='/pooled'>back</a>" + HTML_FOOT)
         else:
             self.send_error(404)
 

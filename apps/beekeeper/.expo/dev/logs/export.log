@@ -1,0 +1,15 @@
+{"_e":"root:init","_t":1787971786322,"format":"v0-jsonl","version":"57.0.20"}
+{"_e":"env:mode","_t":1787971786560,"nodeEnv":"production","babelEnv":"production","mode":"production"}
+{"_e":"env:load","_t":1787971786562,"mode":"production","files":[],"env":{}}
+{"_e":"devserver:start","_t":1787971786769,"mode":"production","web":true,"baseUrl":"","asyncRoutes":false,"routerRoot":"../../../app","serverComponents":false,"serverActions":false,"serverRendering":false,"apiRoutes":false,"exporting":true}
+{"_e":"metro:config","_t":1787971787977,"serverRoot":"../../../../..","projectRoot":"../../..","exporting":true,"flags":{"autolinkingModuleResolution":true,"serverActions":false,"serverComponents":false,"reactCompiler":false,"optimizeGraph":false,"treeshaking":false,"logbox":false}}
+{"_e":"metro:instantiate","_t":1787971788133,"atlas":false,"workers":6,"host":null,"port":null}
+{"_e":"metro:bundling:started","_t":1787971788219,"id":"1","platform":"web","environment":null,"entry":"node_modules/expo-router/entry.js"}
+{"_e":"root:init","_t":1787971893684,"format":"v0-jsonl","version":"57.0.20"}
+{"_e":"env:mode","_t":1787971893900,"nodeEnv":"production","babelEnv":"production","mode":"production"}
+{"_e":"env:load","_t":1787971893903,"mode":"production","files":[],"env":{}}
+{"_e":"devserver:start","_t":1787971894092,"mode":"production","web":true,"baseUrl":"","asyncRoutes":false,"routerRoot":"../../../app","serverComponents":false,"serverActions":false,"serverRendering":false,"apiRoutes":false,"exporting":true}
+{"_e":"metro:config","_t":1787971895188,"serverRoot":"../../../../..","projectRoot":"../../..","exporting":true,"flags":{"autolinkingModuleResolution":true,"serverActions":false,"serverComponents":false,"reactCompiler":false,"optimizeGraph":false,"treeshaking":false,"logbox":false}}
+{"_e":"metro:instantiate","_t":1787971895342,"atlas":false,"workers":6,"host":null,"port":null}
+{"_e":"metro:bundling:started","_t":1787971895414,"id":"1","platform":"web","environment":null,"entry":"node_modules/expo-router/entry.js"}
+{"_e":"metro:bundling:done","_t":1787971901967,"id":"1","total":896,"ms":6552.000516}

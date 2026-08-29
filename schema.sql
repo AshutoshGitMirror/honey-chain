@@ -33,6 +33,24 @@ CREATE TABLE IF NOT EXISTS batch (
   prev_hash TEXT,
   hash TEXT UNIQUE NOT NULL,
   scan_secret TEXT,
+  packer_name TEXT,
+  ca_number TEXT,
+  packing_date TEXT,
+  best_before TEXT,
+  lot_number TEXT,
+  mrp REAL,
+  net_weight REAL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS pooled_lot (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plant_name TEXT,
+  plant_date TEXT NOT NULL,
+  pooled_hash TEXT UNIQUE NOT NULL,
+  prev_hashes TEXT NOT NULL,
+  weight_kg REAL,
+  scan_secret TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
