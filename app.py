@@ -13,29 +13,82 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
-DB = "honeychain.db"
-SCHEMA = "schema.sql"
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB = os.path.join(BASE_DIR, "honeychain.db")
+SCHEMA = os.path.join(BASE_DIR, "schema.sql")
+POSTGRES_SCHEMA = os.path.join(BASE_DIR, "supabase", "schema.sql")
+
+def postgres_dsn():
+    explicit = os.environ.get("SUPABASE_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if explicit:
+        return explicit
+    password = os.environ.get("SUPABASE_SIH_DATABASE_PASS")
+    project_ref = os.environ.get("SUPABASE_SIH_PROJECT_REF")
+    if password and project_ref:
+        encoded = urllib.parse.quote(password, safe="")
+        return f"postgresql://postgres:{encoded}@db.{project_ref}.supabase.co:5432/postgres?sslmode=require"
+    return None
+
+class PostgresConnection:
+    is_postgres = True
+
+    def __init__(self, dsn):
+        if psycopg is None:
+            raise RuntimeError("Postgres is configured but psycopg is not installed")
+        self.connection = psycopg.connect(dsn, row_factory=dict_row)
+
+    def execute(self, sql, params=()):
+        return self.connection.execute(sql.replace("?", "%s"), params)
+
+    def commit(self):
+        self.connection.commit()
+
+    def close(self):
+        self.connection.close()
 
 def db():
+    dsn = postgres_dsn()
+    if dsn:
+        return PostgresConnection(dsn)
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
     return con
 
 def column_exists(con, table, col):
+    if getattr(con, "is_postgres", False):
+        return con.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=? AND column_name=?",
+            (table, col),
+        ).fetchone() is not None
     rows = con.execute(f"PRAGMA table_info({table})").fetchall()
     return any(r["name"] == col for r in rows)
 
 def init_db():
+    if getattr(db, "_initialized", False):
+        return
     need_seed = not os.path.exists(DB)
     con = db()
-    if need_seed:
+    if getattr(con, "is_postgres", False):
+        with open(POSTGRES_SCHEMA) as f:
+            for statement in f.read().split(";"):
+                statement = statement.strip()
+                if statement:
+                    con.execute(statement)
+        con.commit()
+    elif need_seed:
         with open(SCHEMA) as f:
             con.executescript(f.read())
     else:
-        # migrate existing DB — add new columns if missing
+        # migrate existing SQLite DB and ensure base tables exist
         with open(SCHEMA) as f:
-            # ensure base tables exist
             con.executescript(f.read())
         for col, typ in [("photo_url","TEXT"),("collective_name","TEXT"),("latitude","REAL"),("longitude","REAL"),("site_people","TEXT")]:
             if not column_exists(con, "beekeeper", col):
@@ -43,11 +96,11 @@ def init_db():
         for col, typ in [("scan_secret","TEXT"),("packer_name","TEXT"),("ca_number","TEXT"),("packing_date","TEXT"),("best_before","TEXT"),("lot_number","TEXT"),("mrp","REAL"),("net_weight","REAL")]:
             if not column_exists(con, "batch", col):
                 con.execute(f"ALTER TABLE batch ADD COLUMN {col} {typ}")
-        for col, typ in [("scan_secret","TEXT")]:
-            if not column_exists(con, "rating", col):
-                try:
-                    con.execute(f"ALTER TABLE rating ADD COLUMN {col} {typ}")
-                except: pass
+        if not column_exists(con, "rating", "scan_secret"):
+            try:
+                con.execute("ALTER TABLE rating ADD COLUMN scan_secret TEXT")
+            except sqlite3.OperationalError:
+                pass
         con.commit()
     # seed if empty
     cnt = con.execute("SELECT COUNT(*) as c FROM beekeeper").fetchone()["c"]
@@ -60,6 +113,7 @@ def init_db():
                     ("Kareem Ali", "Nashik MH", 6, "Ber honey, 8 boxes near orchard.", "Nashik Madhu Collective", 20.015, 73.795))
         con.commit()
     con.close()
+    db._initialized = True
 
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
@@ -631,8 +685,20 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode() if length else ""
-        data = urllib.parse.parse_qs(body)
-        d = {k: v[0] for k, v in data.items()}
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        wants_json = content_type == "application/json"
+        if wants_json:
+            try:
+                d = json.loads(body) if body else {}
+                if not isinstance(d, dict):
+                    raise ValueError("JSON body must be an object")
+                form_data = {}
+            except (json.JSONDecodeError, ValueError) as e:
+                self.send_error(400, f"Invalid JSON body: {e}")
+                return
+        else:
+            form_data = urllib.parse.parse_qs(body)
+            d = {k: v[0] for k, v in form_data.items()}
         if path == "/api/beekeeper":
             con = db()
             con.execute("INSERT INTO beekeeper (name, phone, village, experience_years, bio, upi_id, promotion_opt_in, photo_url, collective_name, latitude, longitude, site_people) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -662,10 +728,13 @@ class Handler(BaseHTTPRequestHandler):
             con = db()
             last = con.execute("SELECT hash FROM batch ORDER BY id DESC LIMIT 1").fetchone()
             prev = last["hash"] if last else None
-            beekeeper_id = int(d.get("beekeeper_id"))
+            try:
+                beekeeper_id = int(d.get("beekeeper_id") or 1)
+            except (TypeError, ValueError):
+                beekeeper_id = 1
             hive_id = d.get("hive_id")
             harvest_date = d.get("harvest_date")
-            flower = d.get("flower_source") or ""
+            flower = d.get("flower_source") or d.get("floral_source") or ""
             honey_type = d.get("honey_type") or ""
             location = d.get("location") or ""
             h = batch_hash(prev, beekeeper_id, hive_id, harvest_date, flower, honey_type, location)
@@ -674,16 +743,19 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("INSERT INTO batch (beekeeper_id, hive_id, harvest_date, location, honey_type, flower_source, horticulture_notes, harvest_method, weight_kg, prev_hash, hash, scan_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                             (beekeeper_id, hive_id, harvest_date, location, honey_type, flower, d.get("horticulture_notes"), d.get("harvest_method"), float(d.get("weight_kg") or 0) or None, prev, h, scan_secret))
                 con.commit(); con.close()
-                self.redirect(f"/verify/{h}?s={scan_secret}")
+                if wants_json:
+                    self.send_json({"ok": True, "hash": h, "scan_secret": scan_secret, "verify_url": f"/verify/{h}?s={scan_secret}"}, status=201)
+                else:
+                    self.redirect(f"/verify/{h}?s={scan_secret}")
             except sqlite3.IntegrityError as e:
                 con.close()
                 self.send_html(HTML_HEAD + f"<p>Duplicate hash or error: {e}</p><pre>{h}</pre>" + HTML_FOOT)
         elif path == "/api/hive":
             con = db()
-            def f(k):
-                v = d.get(k)
+            def f(*keys):
+                v = next((d.get(key) for key in keys if d.get(key) not in (None, "")), None)
                 return float(v) if v not in (None, "") else None
-            temp = f("temperature"); hum = f("humidity"); weight = f("weight"); sound = f("sound_db")
+            temp = f("temperature", "temp_c"); hum = f("humidity"); weight = f("weight", "weight_kg"); sound = f("sound_db", "sound")
             hive_id = d.get("hive_id")
             beekeeper_id = int(d.get("beekeeper_id")) if d.get("beekeeper_id") else None
             flag = hive_flag(temp, hum, weight, sound)
@@ -695,7 +767,10 @@ class Handler(BaseHTTPRequestHandler):
             con.execute("INSERT INTO hive_reading (hive_id, beekeeper_id, temperature, humidity, weight, sound_db, flag) VALUES (?,?,?,?,?,?,?)",
                         (hive_id, beekeeper_id, temp, hum, weight, sound, flag))
             con.commit(); con.close()
-            self.redirect("/")
+            if wants_json:
+                self.send_json({"ok": True, "flag": flag}, status=201)
+            else:
+                self.redirect("/")
         elif path == "/api/rate":
             con = db()
             try:
@@ -733,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
                 plant_name = d.get("plant_name") or "Plant"
                 plant_date = d.get("plant_date") or datetime.now().date().isoformat()
                 weight = float(d.get("weight_kg") or 0) or None
-                prevs = data.get("prev_hashes", [])
+                prevs = form_data.get("prev_hashes", []) if not wants_json else d.get("prev_hashes", [])
                 if isinstance(prevs, str):
                     prevs = [prevs]
                 if len(prevs)==1 and "," in prevs[0]:
@@ -797,8 +872,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html.encode())
 
-    def send_json(self, obj):
-        self.send_response(200)
+    def send_json(self, obj, status=200):
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(obj, indent=2).encode())

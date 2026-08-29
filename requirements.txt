@@ -1,3 +1,4 @@
 # optional only for server-side QR images
 # app.py runs without this, QR is done in browser
 qrcode[pil]==8.0
+psycopg[binary]==3.2.10

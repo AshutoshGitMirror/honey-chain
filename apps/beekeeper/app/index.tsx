@@ -1,24 +1,31 @@
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
-  View,
+  ActivityIndicator,
+  Alert,
+  Linking,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
   Text,
   TextInput,
-  Pressable,
-  ScrollView,
-  Alert,
-  Platform,
-  Linking,
+  View,
 } from "react-native";
 import * as SQLite from "expo-sqlite";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Location from "expo-location";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-// hyper optimal — single file, KISS, offline-first
-// DB fallback: sqlite on device, memory if sqlite unavailable (web/demo)
 const DB_NAME = "beekeeper.db";
+const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL || "https://honey-chain.onrender.com").replace(/\/$/, "");
+const BEEKEEPER_ID = "1";
+
+function apiUrl(path: string) {
+  return `${API_BASE_URL}${path}`;
+}
 
 let db: SQLite.SQLiteDatabase | null = null;
+
 function getDb() {
   if (db) return db;
   try {
@@ -32,21 +39,17 @@ function getDb() {
 function initDb() {
   const d = getDb();
   if (!d) return;
-  d.execSync(
-    `CREATE TABLE IF NOT EXISTS batch_pending (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      beekeeper_id TEXT, hive_id TEXT, harvest_date TEXT, location TEXT,
-      floral_source TEXT, honey_type TEXT, weight_kg REAL,
-      latitude REAL, longitude REAL, prev_hash TEXT, hash TEXT, synced INTEGER DEFAULT 0
-    );`
-  );
-  d.execSync(
-    `CREATE TABLE IF NOT EXISTS hive_pending (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      hive_id TEXT, temp_c REAL, humidity REAL, weight_kg REAL, notes TEXT,
-      latitude REAL, longitude REAL, ts TEXT, synced INTEGER DEFAULT 0
-    );`
-  );
+  d.execSync(`CREATE TABLE IF NOT EXISTS batch_pending (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    beekeeper_id TEXT, hive_id TEXT, harvest_date TEXT, location TEXT,
+    floral_source TEXT, honey_type TEXT, weight_kg REAL,
+    latitude REAL, longitude REAL, prev_hash TEXT, hash TEXT, synced INTEGER DEFAULT 0
+  );`);
+  d.execSync(`CREATE TABLE IF NOT EXISTS hive_pending (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hive_id TEXT, temp_c REAL, humidity REAL, weight_kg REAL, notes TEXT,
+    latitude REAL, longitude REAL, ts TEXT, synced INTEGER DEFAULT 0
+  );`);
 }
 
 type Harvest = {
@@ -64,11 +67,12 @@ type HiveLog = {
   notes: string;
 };
 
-// naive hash for demo — SHA256 via fallback string (real uses prev_hash chain)
-function cheapHash(s: string) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return h.toString(16).padStart(8, "0");
+function cheapHash(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
 }
 
 async function syncPending() {
@@ -76,38 +80,225 @@ async function syncPending() {
   if (!d) return { batches: 0, hives: 0 };
   const batches = d.getAllSync("SELECT * FROM batch_pending WHERE synced=0") as any[];
   const hives = d.getAllSync("SELECT * FROM hive_pending WHERE synced=0") as any[];
-  let bOk = 0, hOk = 0;
-  for (const b of batches) {
+  let batchCount = 0;
+  let hiveCount = 0;
+
+  for (const batch of batches) {
     try {
-      const r = await fetch("/api/batch", {
+      const response = await fetch(apiUrl("/api/batch"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(b),
+        body: JSON.stringify(batch),
       });
-      if (r.ok) {
-        d.runSync("UPDATE batch_pending SET synced=1 WHERE id=?", [b.id]);
-        bOk++;
+      if (response.ok) {
+        d.runSync("UPDATE batch_pending SET synced=1 WHERE id=?", [batch.id]);
+        batchCount += 1;
       }
-    } catch {}
+    } catch {
+      // Keep the row pending. A field worker may be offline for hours.
+    }
   }
-  for (const h of hives) {
+
+  for (const hive of hives) {
     try {
-      const r = await fetch("/api/hive", {
+      const response = await fetch(apiUrl("/api/hive"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(h),
+        body: JSON.stringify(hive),
       });
-      if (r.ok) {
-        d.runSync("UPDATE hive_pending SET synced=1 WHERE id=?", [h.id]);
-        hOk++;
+      if (response.ok) {
+        d.runSync("UPDATE hive_pending SET synced=1 WHERE id=?", [hive.id]);
+        hiveCount += 1;
       }
-    } catch {}
+    } catch {
+      // Keep the row pending until the next manual or automatic sync.
+    }
   }
-  return { batches: bOk, hives: hOk };
+
+  return { batches: batchCount, hives: hiveCount };
 }
 
+function Field({
+  label,
+  placeholder,
+  value,
+  onChangeText,
+  keyboardType,
+}: {
+  label: string;
+  placeholder: string;
+  value: string;
+  onChangeText: (value: string) => void;
+  keyboardType?: "default" | "numeric";
+}) {
+  return (
+    <View style={styles.field}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={colors.placeholder}
+        keyboardType={keyboardType}
+        style={styles.input}
+        accessibilityLabel={label}
+      />
+    </View>
+  );
+}
+
+function ActionButton({
+  label,
+  onPress,
+  variant = "primary",
+  disabled = false,
+  accessibilityLabel,
+}: {
+  label: string;
+  onPress: () => void;
+  variant?: "primary" | "quiet" | "outline";
+  disabled?: boolean;
+  accessibilityLabel?: string;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? label}
+      style={({ pressed }) => [
+        styles.button,
+        variant === "quiet" && styles.quietButton,
+        variant === "outline" && styles.outlineButton,
+        pressed && styles.buttonPressed,
+        disabled && styles.disabledButton,
+      ]}
+    >
+      {disabled && <ActivityIndicator color={variant === "primary" ? colors.white : colors.green} size="small" />}
+      <Text
+        style={[
+          styles.buttonText,
+          variant === "quiet" && styles.quietButtonText,
+          variant === "outline" && styles.outlineButtonText,
+        ]}
+      >
+        {disabled ? "Saving..." : label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function SectionHeading({ eyebrow, title, children }: { eyebrow: string; title: string; children?: ReactNode }) {
+  return (
+    <View style={styles.sectionHeading}>
+      <Text style={styles.eyebrow}>{eyebrow}</Text>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {children}
+    </View>
+  );
+}
+
+const colors = {
+  ink: "#193026",
+  muted: "#63756B",
+  placeholder: "#98A69E",
+  cream: "#F7F4EC",
+  white: "#FFFFFF",
+  green: "#175B45",
+  greenDark: "#0F4635",
+  greenTint: "#E3F0E9",
+  honey: "#EFB53D",
+  honeyTint: "#FFF1C9",
+  line: "#D9E4DC",
+  redTint: "#FCE9E2",
+};
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.cream },
+  scroll: { flex: 1 },
+  content: { width: "100%", maxWidth: 640, alignSelf: "center", padding: 20, paddingBottom: 44 },
+  topBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 26 },
+  brand: { flexDirection: "row", alignItems: "center", gap: 10 },
+  brandMark: { width: 38, height: 38, borderRadius: 13, backgroundColor: colors.honey, alignItems: "center", justifyContent: "center" },
+  brandMarkText: { color: colors.greenDark, fontSize: 18, fontWeight: "800" },
+  brandName: { color: colors.ink, fontSize: 12, fontWeight: "800", letterSpacing: 1.4 },
+  brandSub: { color: colors.muted, fontSize: 11, marginTop: 2 },
+  statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.green, marginRight: 7 },
+  onlineStatus: { flexDirection: "row", alignItems: "center", backgroundColor: colors.greenTint, borderRadius: 18, paddingHorizontal: 11, paddingVertical: 8 },
+  statusText: { color: colors.greenDark, fontSize: 11, fontWeight: "700" },
+  welcome: { marginBottom: 20 },
+  welcomeTitle: { color: colors.ink, fontSize: 32, lineHeight: 38, fontWeight: "800", letterSpacing: -0.6 },
+  welcomeBody: { color: colors.muted, fontSize: 15, lineHeight: 22, marginTop: 7, maxWidth: 470 },
+  hero: { backgroundColor: colors.green, borderRadius: 24, padding: 20, marginBottom: 16, overflow: "hidden" },
+  heroKicker: { color: "#BFE4D0", fontSize: 12, fontWeight: "700", letterSpacing: 0.6 },
+  heroTitle: { color: colors.white, fontSize: 22, lineHeight: 28, fontWeight: "800", marginTop: 6, maxWidth: 390 },
+  heroBody: { color: "#D8EFE1", fontSize: 13, lineHeight: 19, marginTop: 7, maxWidth: 420 },
+  heroButton: { alignSelf: "flex-start", backgroundColor: colors.honey, marginTop: 16, paddingHorizontal: 17 },
+  heroButtonText: { color: colors.greenDark },
+  tabs: { flexDirection: "row", backgroundColor: colors.white, borderRadius: 16, padding: 4, marginBottom: 16, borderWidth: 1, borderColor: colors.line },
+  tab: { flex: 1, minHeight: 46, alignItems: "center", justifyContent: "center", borderRadius: 12 },
+  activeTab: { backgroundColor: colors.green },
+  tabText: { color: colors.muted, fontSize: 12, fontWeight: "700" },
+  activeTabText: { color: colors.white },
+  statusCard: { backgroundColor: colors.white, borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 16, marginBottom: 16 },
+  statusRow: { flexDirection: "row", alignItems: "center" },
+  statusTitle: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  statusBody: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
+  pendingBadge: { marginLeft: "auto", backgroundColor: colors.honeyTint, borderRadius: 10, paddingHorizontal: 9, paddingVertical: 6 },
+  pendingText: { color: colors.greenDark, fontSize: 11, fontWeight: "800" },
+  formCard: { backgroundColor: colors.white, borderRadius: 22, borderWidth: 1, borderColor: colors.line, padding: 18, marginBottom: 16 },
+  sectionHeading: { marginBottom: 17 },
+  eyebrow: { color: colors.green, fontSize: 11, letterSpacing: 1.1, fontWeight: "800", textTransform: "uppercase" },
+  sectionTitle: { color: colors.ink, fontSize: 21, lineHeight: 27, fontWeight: "800", marginTop: 4 },
+  helper: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 5 },
+  field: { marginBottom: 13 },
+  fieldLabel: { color: colors.ink, fontSize: 12, fontWeight: "800", marginBottom: 7 },
+  input: { minHeight: 50, borderWidth: 1, borderColor: colors.line, borderRadius: 13, color: colors.ink, backgroundColor: "#FBFCFA", paddingHorizontal: 14, fontSize: 15 },
+  twoFields: { flexDirection: "row", gap: 10 },
+  halfField: { flex: 1 },
+  button: { minHeight: 50, borderRadius: 14, backgroundColor: colors.green, paddingHorizontal: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  buttonText: { color: colors.white, fontSize: 14, fontWeight: "800", textAlign: "center" },
+  quietButton: { backgroundColor: colors.honey },
+  quietButtonText: { color: colors.greenDark },
+  outlineButton: { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.green },
+  outlineButtonText: { color: colors.green },
+  buttonPressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
+  disabledButton: { opacity: 0.62 },
+  locationCard: { backgroundColor: colors.greenTint, borderRadius: 20, padding: 17, marginBottom: 16 },
+  locationTop: { flexDirection: "row", alignItems: "flex-start", gap: 11 },
+  locationIcon: { width: 34, height: 34, borderRadius: 12, backgroundColor: colors.white, alignItems: "center", justifyContent: "center" },
+  locationIconText: { color: colors.green, fontSize: 16, fontWeight: "800" },
+  locationTitle: { color: colors.greenDark, fontSize: 15, fontWeight: "800" },
+  locationBody: { color: colors.green, fontSize: 12, lineHeight: 18, marginTop: 3, flex: 1 },
+  locationButton: { marginTop: 14, backgroundColor: colors.white },
+  locationButtonText: { color: colors.green },
+  coords: { color: colors.greenDark, fontSize: 12, fontWeight: "700", marginTop: 12 },
+  cameraCard: { backgroundColor: colors.ink, borderRadius: 20, padding: 17, marginBottom: 16 },
+  cameraTitle: { color: colors.white, fontSize: 16, fontWeight: "800" },
+  cameraBody: { color: "#B8C9C0", fontSize: 12, lineHeight: 18, marginTop: 4 },
+  cameraButton: { backgroundColor: colors.honey, marginTop: 13 },
+  cameraButtonText: { color: colors.greenDark },
+  cameraView: { height: 270, borderRadius: 16, overflow: "hidden", marginTop: 14 },
+  cameraClose: { position: "absolute", bottom: 12, alignSelf: "center", backgroundColor: "rgba(0,0,0,0.75)", paddingHorizontal: 16 },
+  cameraCloseText: { color: colors.white },
+  scanResult: { color: "#D8EFE1", fontSize: 12, lineHeight: 18, marginTop: 11 },
+  mapPreview: { height: 190, borderRadius: 16, backgroundColor: colors.honeyTint, borderWidth: 1, borderColor: "#E8CF83", alignItems: "center", justifyContent: "center", marginBottom: 16 },
+  mapPin: { width: 46, height: 46, borderRadius: 23, backgroundColor: colors.green, alignItems: "center", justifyContent: "center", marginBottom: 9 },
+  mapPinText: { color: colors.honey, fontSize: 19, fontWeight: "900" },
+  mapTitle: { color: colors.greenDark, fontSize: 14, fontWeight: "800" },
+  mapBody: { color: colors.green, fontSize: 12, marginTop: 4 },
+  profileCard: { backgroundColor: colors.white, borderRadius: 22, borderWidth: 1, borderColor: colors.line, padding: 18, marginBottom: 16 },
+  profileRow: { flexDirection: "row", alignItems: "center", gap: 13 },
+  avatar: { width: 54, height: 54, borderRadius: 18, backgroundColor: colors.honeyTint, alignItems: "center", justifyContent: "center" },
+  avatarText: { color: colors.greenDark, fontSize: 21, fontWeight: "900" },
+  profileName: { color: colors.ink, fontSize: 18, fontWeight: "800" },
+  profileBody: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  privacyNote: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line },
+  footer: { color: colors.muted, textAlign: "center", fontSize: 11, lineHeight: 17, marginTop: 8 },
+});
+
 export default function Home() {
-  const qc = useQueryClient();
+  const queryClient = useQueryClient();
   const [permission, requestPermission] = useCameraPermissions();
   const [showCamera, setShowCamera] = useState(false);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -115,94 +306,104 @@ export default function Home() {
   const [hive, setHive] = useState<HiveLog>({ hive_id: "", temp_c: "", humidity: "", weight_kg: "", notes: "" });
   const [lastScan, setLastScan] = useState<string | null>(null);
   const [tab, setTab] = useState<"harvest" | "hive" | "profile">("harvest");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     initDb();
   }, []);
 
-  const pendingQ = useQuery({
+  const pendingQuery = useQuery({
     queryKey: ["pending"],
     queryFn: () => {
       const d = getDb();
       if (!d) return { batch: 0, hive: 0 };
-      const b = d.getAllSync("SELECT count(*) as c FROM batch_pending WHERE synced=0") as any[];
-      const h = d.getAllSync("SELECT count(*) as c FROM hive_pending WHERE synced=0") as any[];
-      return { batch: b[0]?.c ?? 0, hive: h[0]?.c ?? 0 };
+      const batches = d.getAllSync("SELECT count(*) as c FROM batch_pending WHERE synced=0") as any[];
+      const hives = d.getAllSync("SELECT count(*) as c FROM hive_pending WHERE synced=0") as any[];
+      return { batch: batches[0]?.c ?? 0, hive: hives[0]?.c ?? 0 };
     },
     refetchInterval: 3000,
   });
 
-  const syncMut = useMutation({
+  const syncMutation = useMutation({
     mutationFn: syncPending,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["pending"] }),
   });
 
   const grabGps = useCallback(async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== "granted") {
-      Alert.alert("Location denied", "Household pin needs GPS.");
+      Alert.alert("Location not allowed", "Allow location so this household can have one shared pin.");
       return;
     }
-    const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-    setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+    const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    setCoords({ lat: position.coords.latitude, lng: position.coords.longitude });
   }, []);
 
+  const openMap = useCallback(() => {
+    if (!coords) return;
+    const url = `https://www.openstreetmap.org/?mlat=${coords.lat}&mlon=${coords.lng}#map=15/${coords.lat}/${coords.lng}`;
+    Linking.openURL(url);
+  }, [coords]);
+
   const addHarvest = useCallback(async () => {
-    if (!harvest.hive_id) {
-      Alert.alert("Need hive_id");
+    if (!harvest.hive_id.trim()) {
+      Alert.alert("Add the hive number", "This tells us which hive gave this harvest.");
       return;
     }
+    setSaving(true);
     const d = getDb();
-    const now = new Date().toISOString().slice(0, 10);
-    const hash = cheapHash(`${harvest.hive_id}${now}${coords?.lat ?? ""}${Math.random()}`);
+    const date = new Date().toISOString().slice(0, 10);
+    const hash = cheapHash(`${harvest.hive_id}${date}${coords?.lat ?? ""}${Math.random()}`);
     const row = {
-      beekeeper_id: "self",
-      hive_id: harvest.hive_id,
-      harvest_date: now,
+      beekeeper_id: BEEKEEPER_ID,
+      hive_id: harvest.hive_id.trim(),
+      harvest_date: date,
       location: coords ? `${coords.lat},${coords.lng}` : "",
-      floral_source: harvest.floral_source,
-      honey_type: harvest.honey_type,
+      floral_source: harvest.floral_source.trim(),
+      honey_type: harvest.honey_type.trim(),
       weight_kg: Number(harvest.weight_kg) || 0,
       latitude: coords?.lat ?? null,
       longitude: coords?.lng ?? null,
       prev_hash: "",
       hash,
     };
-    // offline first: write to sqlite, then try sync
     if (d) {
       d.runSync(
         `INSERT INTO batch_pending (beekeeper_id,hive_id,harvest_date,location,floral_source,honey_type,weight_kg,latitude,longitude,prev_hash,hash,synced) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)`,
         [row.beekeeper_id, row.hive_id, row.harvest_date, row.location, row.floral_source, row.honey_type, row.weight_kg, row.latitude, row.longitude, row.prev_hash, row.hash]
       );
     }
-    // try immediate POST, if success mark synced
     try {
-      const r = await fetch("/api/batch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(row) });
-      if (r.ok && d) {
+      const response = await fetch(apiUrl("/api/batch"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(row) });
+      if (response.ok && d) {
         const last = d.getAllSync("SELECT id FROM batch_pending ORDER BY id DESC LIMIT 1") as any[];
         if (last[0]) d.runSync("UPDATE batch_pending SET synced=1 WHERE id=?", [last[0].id]);
       }
-    } catch {}
-    qc.invalidateQueries({ queryKey: ["pending"] });
-    Alert.alert("Saved harvest", `hash ${hash} ${d ? "offline-ready" : "memory"}`);
-  }, [harvest, coords, qc]);
+    } catch {
+      // The saved row will sync later.
+    }
+    setSaving(false);
+    queryClient.invalidateQueries({ queryKey: ["pending"] });
+    Alert.alert("Harvest saved", `Record ${hash} is safe on this phone and ready to sync.`);
+    setHarvest({ hive_id: "", floral_source: "", honey_type: "", weight_kg: "" });
+  }, [coords, harvest, queryClient]);
 
   const addHive = useCallback(async () => {
-    if (!hive.hive_id) {
-      Alert.alert("Need hive_id");
+    if (!hive.hive_id.trim()) {
+      Alert.alert("Add the hive number", "This tells us which hive you checked.");
       return;
     }
+    setSaving(true);
     const d = getDb();
-    const ts = new Date().toISOString();
     const row = {
-      hive_id: hive.hive_id,
+      hive_id: hive.hive_id.trim(),
       temp_c: Number(hive.temp_c) || 0,
       humidity: Number(hive.humidity) || 0,
       weight_kg: Number(hive.weight_kg) || 0,
-      notes: hive.notes,
+      notes: hive.notes.trim(),
       latitude: coords?.lat ?? null,
       longitude: coords?.lng ?? null,
-      ts,
+      ts: new Date().toISOString(),
     };
     if (d) {
       d.runSync(`INSERT INTO hive_pending (hive_id,temp_c,humidity,weight_kg,notes,latitude,longitude,ts,synced) VALUES (?,?,?,?,?,?,?, ?,0)`, [
@@ -210,161 +411,175 @@ export default function Home() {
       ]);
     }
     try {
-      const r = await fetch("/api/hive", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(row) });
-      if (r.ok && d) {
+      const response = await fetch(apiUrl("/api/hive"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(row) });
+      if (response.ok && d) {
         const last = d.getAllSync("SELECT id FROM hive_pending ORDER BY id DESC LIMIT 1") as any[];
         if (last[0]) d.runSync("UPDATE hive_pending SET synced=1 WHERE id=?", [last[0].id]);
       }
-    } catch {}
-    qc.invalidateQueries({ queryKey: ["pending"] });
-    Alert.alert("Hive logged", `hive ${hive.hive_id}`);
-  }, [hive, coords, qc]);
+    } catch {
+      // The saved row will sync later.
+    }
+    setSaving(false);
+    queryClient.invalidateQueries({ queryKey: ["pending"] });
+    Alert.alert("Hive check saved", "The check is safe on this phone and ready to sync.");
+    setHive({ hive_id: "", temp_c: "", humidity: "", weight_kg: "", notes: "" });
+  }, [coords, hive, queryClient]);
 
-  // map helper — OSM
-  const openMap = () => {
-    if (!coords) return;
-    const url = `https://www.openstreetmap.org/?mlat=${coords.lat}&mlon=${coords.lng}#map=15/${coords.lat}/${coords.lng}`;
-    Linking.openURL(url);
-  };
+  const pending = (pendingQuery.data?.batch ?? 0) + (pendingQuery.data?.hive ?? 0);
 
   return (
-    <ScrollView className="flex-1 bg-amber-50" contentContainerClassName="p-4 gap-4">
-      {/* header */}
-      <View className="bg-white rounded-2xl p-4 border border-amber-200">
-        <Text className="text-xl font-bold text-amber-900">Beekeeper — Honey Chain</Text>
-        <Text className="text-amber-700 text-xs mt-1">Offline SQLite • QR • GPS household pin • Sync POST /api/batch & /api/hive</Text>
-        <View className="flex-row gap-2 mt-3">
-          <Pressable onPress={() => setTab("harvest")} className={`px-3 py-2 rounded-full ${tab === "harvest" ? "bg-amber-900" : "bg-amber-100"}`}>
-            <Text className={tab === "harvest" ? "text-white" : "text-amber-900"}>Add harvest</Text>
-          </Pressable>
-          <Pressable onPress={() => setTab("hive")} className={`px-3 py-2 rounded-full ${tab === "hive" ? "bg-amber-900" : "bg-amber-100"}`}>
-            <Text className={tab === "hive" ? "text-white" : "text-amber-900"}>Log hive</Text>
-          </Pressable>
-          <Pressable onPress={() => setTab("profile")} className={`px-3 py-2 rounded-full ${tab === "profile" ? "bg-amber-900" : "bg-amber-100"}`}>
-            <Text className={tab === "profile" ? "text-white" : "text-amber-900"}>Profile + Map</Text>
-          </Pressable>
+    <SafeAreaView style={styles.safe}>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <View style={styles.topBar}>
+          <View style={styles.brand}>
+            <View style={styles.brandMark}><Text style={styles.brandMarkText}>H</Text></View>
+            <View>
+              <Text style={styles.brandName}>HONEY CHAIN</Text>
+              <Text style={styles.brandSub}>Your harvest record</Text>
+            </View>
+          </View>
+          <View style={styles.onlineStatus} accessibilityLabel="Saved on this phone">
+            <View style={styles.statusDot} />
+            <Text style={styles.statusText}>Saved here</Text>
+          </View>
         </View>
-        <View className="flex-row gap-2 mt-3 items-center">
-          <Text className="text-xs text-amber-800">Pending: batch {pendingQ.data?.batch ?? 0} • hive {pendingQ.data?.hive ?? 0}</Text>
-          <Pressable onPress={() => syncMut.mutate()} className="ml-auto bg-amber-600 px-3 py-2 rounded-xl">
-            <Text className="text-white text-xs">{syncMut.isPending ? "Syncing…" : "Sync now"}</Text>
-          </Pressable>
-        </View>
-      </View>
 
-      {/* GPS */}
-      <View className="bg-white rounded-2xl p-4 border border-amber-200">
-        <Text className="font-semibold text-amber-900">Household pin (GPS)</Text>
-        <Text className="text-xs text-amber-700">One pin per household — same coords used for harvest & hive. Shown on every profile.</Text>
-        <View className="flex-row gap-2 mt-2">
-          <Pressable onPress={grabGps} className="bg-amber-900 px-4 py-3 rounded-xl">
-            <Text className="text-white font-semibold">📍 Get location</Text>
-          </Pressable>
-          {coords && (
-            <Pressable onPress={openMap} className="bg-white border border-amber-300 px-3 py-3 rounded-xl">
-              <Text className="text-amber-900">Open OSM</Text>
-            </Pressable>
+        <View style={styles.welcome}>
+          <Text style={styles.welcomeTitle}>Good morning.</Text>
+          <Text style={styles.welcomeBody}>Record the work once. We keep it safe, even when the signal is gone.</Text>
+        </View>
+
+        <View style={styles.hero}>
+          <Text style={styles.heroKicker}>TODAY&apos;S SIMPLE STEP</Text>
+          <Text style={styles.heroTitle}>Did you collect honey today?</Text>
+          <Text style={styles.heroBody}>Write down the hive, flower, and weight. The cooperative can trace it later.</Text>
+          <ActionButton label="Add a harvest" onPress={() => setTab("harvest")} variant="quiet" />
+        </View>
+
+        <View style={styles.tabs} accessibilityRole="tablist">
+          {(["harvest", "hive", "profile"] as const).map((item) => {
+            const labels = { harvest: "Harvest", hive: "Hive check", profile: "My place" };
+            return (
+              <Pressable
+                key={item}
+                onPress={() => setTab(item)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: tab === item }}
+                style={[styles.tab, tab === item && styles.activeTab]}
+              >
+                <Text style={[styles.tabText, tab === item && styles.activeTabText]}>{labels[item]}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <View style={styles.statusCard}>
+          <View style={styles.statusRow}>
+            <View>
+              <Text style={styles.statusTitle}>{pending === 0 ? "Everything is up to date" : `${pending} record${pending === 1 ? "" : "s"} waiting`}</Text>
+              <Text style={styles.statusBody}>{pending === 0 ? "Your work is recorded on this phone." : "No problem. Send when the network returns."}</Text>
+            </View>
+            {pending > 0 && <View style={styles.pendingBadge}><Text style={styles.pendingText}>{pending} to send</Text></View>}
+          </View>
+          {pending > 0 && (
+            <View style={{ marginTop: 12 }}>
+              <ActionButton label={syncMutation.isPending ? "Sending records..." : "Send now"} onPress={() => syncMutation.mutate()} disabled={syncMutation.isPending} variant="outline" />
+            </View>
           )}
         </View>
-        {coords ? (
-          <Text className="text-xs text-amber-800 mt-2">{coords.lat.toFixed(5)}, {coords.lng.toFixed(5)} • household pin everywhere</Text>
-        ) : (
-          <Text className="text-xs text-amber-600 mt-2">No pin yet — tap Get location (needs allow).</Text>
-        )}
-      </View>
 
-      {/* QR */}
-      <View className="bg-white rounded-2xl p-4 border border-amber-200">
-        <Text className="font-semibold text-amber-900">QR — scan batch</Text>
-        {!permission ? (
-          <Text className="text-xs">Requesting camera…</Text>
-        ) : !permission.granted ? (
-          <Pressable onPress={requestPermission} className="bg-amber-100 p-3 rounded-xl mt-2">
-            <Text className="text-amber-900">Allow camera to scan QR</Text>
-          </Pressable>
-        ) : showCamera ? (
-          <View className="h-64 overflow-hidden rounded-xl mt-2">
-            <CameraView
-              style={{ flex: 1 }}
-              facing="back"
-              barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-              onBarcodeScanned={({ data }: { data: string }) => {
-                setLastScan(data);
-                setShowCamera(false);
-              }}
-            />
-            <Pressable onPress={() => setShowCamera(false)} className="absolute bottom-2 self-center bg-black/70 px-4 py-2 rounded-full">
-              <Text className="text-white">Close</Text>
-            </Pressable>
+        {tab === "harvest" && (
+          <View style={styles.formCard}>
+            <SectionHeading eyebrow="New record" title="Add a harvest">
+              <Text style={styles.helper}>This record is locked with a fingerprint when you save it.</Text>
+            </SectionHeading>
+            <Field label="Hive number" placeholder="For example, 1 or H-01" value={harvest.hive_id} onChangeText={(value) => setHarvest((current) => ({ ...current, hive_id: value }))} />
+            <Field label="Flower nearby" placeholder="For example, mustard" value={harvest.floral_source} onChangeText={(value) => setHarvest((current) => ({ ...current, floral_source: value }))} />
+            <Field label="Honey kind" placeholder="For example, raw honey" value={harvest.honey_type} onChangeText={(value) => setHarvest((current) => ({ ...current, honey_type: value }))} />
+            <Field label="How much? (kg)" placeholder="For example, 12" value={harvest.weight_kg} onChangeText={(value) => setHarvest((current) => ({ ...current, weight_kg: value }))} keyboardType="numeric" />
+            <ActionButton label="Save harvest" onPress={addHarvest} disabled={saving} />
+            <Text style={styles.footer}>No signal is okay. The phone saves first and sends later.</Text>
           </View>
-        ) : (
-          <Pressable onPress={() => setShowCamera(true)} className="bg-amber-900 px-4 py-3 rounded-xl mt-2">
-            <Text className="text-white font-semibold">📷 Scan QR</Text>
-          </Pressable>
         )}
-        {lastScan && <Text className="text-xs text-amber-800 mt-2">Last QR: {lastScan.slice(0, 60)}</Text>}
-        <Text className="text-[11px] text-amber-600 mt-1">Camera via expo-camera, offline decode, works without network.</Text>
-      </View>
 
-      {tab === "harvest" && (
-        <View className="bg-white rounded-2xl p-4 border border-amber-200 gap-3">
-          <Text className="font-bold text-amber-900">Add harvest — farmer logs, coop prints</Text>
-          <TextInput value={harvest.hive_id} onChangeText={(v: string) => setHarvest((s: Harvest) => ({ ...s, hive_id: v }))} placeholder="hive_id e.g. HIVE-1" className="border border-amber-200 rounded-xl p-3" />
-          <TextInput value={harvest.floral_source} onChangeText={(v: string) => setHarvest((s: Harvest) => ({ ...s, floral_source: v }))} placeholder="floral source e.g. mustard" className="border border-amber-200 rounded-xl p-3" />
-          <TextInput value={harvest.honey_type} onChangeText={(v: string) => setHarvest((s: Harvest) => ({ ...s, honey_type: v }))} placeholder="honey type e.g. raw" className="border border-amber-200 rounded-xl p-3" />
-          <TextInput value={harvest.weight_kg} onChangeText={(v: string) => setHarvest((s: Harvest) => ({ ...s, weight_kg: v }))} placeholder="weight kg" keyboardType="numeric" className="border border-amber-200 rounded-xl p-3" />
-          <Pressable onPress={addHarvest} className="bg-amber-900 p-4 rounded-xl items-center">
-            <Text className="text-white font-bold">Save harvest offline + sync /api/batch</Text>
-          </Pressable>
-          <Text className="text-[11px] text-amber-600">Writes SQLite batch_pending (synced=0), then POST /api/batch if online. Hash = fingerprint.</Text>
-        </View>
-      )}
-
-      {tab === "hive" && (
-        <View className="bg-white rounded-2xl p-4 border border-amber-200 gap-3">
-          <Text className="font-bold text-amber-900">Log hive — telemetry</Text>
-          <TextInput value={hive.hive_id} onChangeText={(v: string) => setHive((s: HiveLog) => ({ ...s, hive_id: v }))} placeholder="hive_id" className="border border-amber-200 rounded-xl p-3" />
-          <View className="flex-row gap-2">
-            <TextInput value={hive.temp_c} onChangeText={(v: string) => setHive((s: HiveLog) => ({ ...s, temp_c: v }))} placeholder="temp °C" keyboardType="numeric" className="flex-1 border border-amber-200 rounded-xl p-3" />
-            <TextInput value={hive.humidity} onChangeText={(v: string) => setHive((s: HiveLog) => ({ ...s, humidity: v }))} placeholder="humidity %" keyboardType="numeric" className="flex-1 border border-amber-200 rounded-xl p-3" />
+        {tab === "hive" && (
+          <View style={styles.formCard}>
+            <SectionHeading eyebrow="Quick check" title="How is the hive today?">
+              <Text style={styles.helper}>A few numbers help the cooperative spot trouble early.</Text>
+            </SectionHeading>
+            <Field label="Hive number" placeholder="For example, 1 or H-01" value={hive.hive_id} onChangeText={(value) => setHive((current) => ({ ...current, hive_id: value }))} />
+            <View style={styles.twoFields}>
+              <View style={styles.halfField}><Field label="Temperature (°C)" placeholder="35" value={hive.temp_c} onChangeText={(value) => setHive((current) => ({ ...current, temp_c: value }))} keyboardType="numeric" /></View>
+              <View style={styles.halfField}><Field label="Humidity (%)" placeholder="60" value={hive.humidity} onChangeText={(value) => setHive((current) => ({ ...current, humidity: value }))} keyboardType="numeric" /></View>
+            </View>
+            <Field label="Hive weight (kg)" placeholder="For example, 28" value={hive.weight_kg} onChangeText={(value) => setHive((current) => ({ ...current, weight_kg: value }))} keyboardType="numeric" />
+            <Field label="What did you see?" placeholder="For example, queen seen" value={hive.notes} onChangeText={(value) => setHive((current) => ({ ...current, notes: value }))} />
+            <ActionButton label="Save hive check" onPress={addHive} disabled={saving} />
           </View>
-          <TextInput value={hive.weight_kg} onChangeText={(v: string) => setHive((s: HiveLog) => ({ ...s, weight_kg: v }))} placeholder="weight kg" keyboardType="numeric" className="border border-amber-200 rounded-xl p-3" />
-          <TextInput value={hive.notes} onChangeText={(v: string) => setHive((s: HiveLog) => ({ ...s, notes: v }))} placeholder="notes e.g. queen seen" className="border border-amber-200 rounded-xl p-3" />
-          <Pressable onPress={addHive} className="bg-amber-900 p-4 rounded-xl items-center">
-            <Text className="text-white font-bold">Save hive offline + sync /api/hive</Text>
-          </Pressable>
-          <Text className="text-[11px] text-amber-600">Writes hive_pending, syncs to POST /api/hive. Threshold alerts local-only.</Text>
-        </View>
-      )}
+        )}
 
-      {tab === "profile" && (
-        <View className="bg-white rounded-2xl p-4 border border-amber-200 gap-3">
-          <Text className="font-bold text-amber-900">Profile + household map</Text>
-          <View className="h-40 bg-amber-100 rounded-xl items-center justify-center border border-amber-200">
-            {coords ? (
-              <View className="items-center">
-                <Text className="text-amber-900 font-semibold">{coords.lat.toFixed(4)}, {coords.lng.toFixed(4)}</Text>
-                <Text className="text-xs text-amber-700">Household pin — village level, not per-room</Text>
-                <Pressable onPress={openMap} className="mt-2 bg-white border border-amber-300 px-3 py-2 rounded-full">
-                  <Text className="text-amber-900 text-xs">Open Google/OSM map</Text>
-                </Pressable>
-                {Platform.OS === "web" && (
-                  <Text className="text-[11px] text-amber-600 mt-1">Web: map opens in new tab (Native map on device)</Text>
-                )}
+        {tab === "profile" && (
+          <>
+            <View style={styles.profileCard}>
+              <View style={styles.profileRow}>
+                <View style={styles.avatar}><Text style={styles.avatarText}>BK</Text></View>
+                <View>
+                  <Text style={styles.profileName}>My household</Text>
+                  <Text style={styles.profileBody}>Demo cooperative · 2 years keeping bees</Text>
+                </View>
               </View>
-            ) : (
-              <Text className="text-amber-700 text-xs">No household pin — get location above</Text>
-            )}
-          </View>
-          <View className="bg-amber-50 p-3 rounded-xl border border-amber-100">
-            <Text className="text-xs text-amber-800">Beekeeper: self • Collective: demo • Experience: 2y</Text>
-            <Text className="text-[11px] text-amber-600">Photo + rating shown on consumer verify page. UPI masked by default.</Text>
-          </View>
-          <Text className="text-[11px] text-amber-600">Map uses expo-location coords + Linking to OSM/Google — no API key, hyper optimal.</Text>
-        </View>
-      )}
+              <Text style={styles.privacyNote}>One shared home pin links your harvest and hive checks. It shows the household area, not the inside of your home.</Text>
+            </View>
+            <View style={styles.locationCard}>
+              <View style={styles.locationTop}>
+                <View style={styles.locationIcon}><Text style={styles.locationIconText}>+</Text></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.locationTitle}>Household location</Text>
+                  <Text style={styles.locationBody}>Use one place for this household&apos;s records.</Text>
+                </View>
+              </View>
+              <ActionButton label={coords ? "Update location" : "Add household location"} onPress={grabGps} variant="outline" />
+              {coords && <Text style={styles.coords}>{coords.lat.toFixed(5)}, {coords.lng.toFixed(5)} · saved for this household</Text>}
+              {coords && <View style={{ marginTop: 10 }}><ActionButton label="Open map" onPress={openMap} variant="quiet" /></View>}
+            </View>
+            <View style={styles.mapPreview}>
+              <View style={styles.mapPin}><Text style={styles.mapPinText}>+</Text></View>
+              <Text style={styles.mapTitle}>{coords ? "Household pin ready" : "Your household map"}</Text>
+              <Text style={styles.mapBody}>{coords ? "The same pin follows every record." : "Add a location above to place the pin."}</Text>
+            </View>
+          </>
+        )}
 
-      <View className="h-10" />
-    </ScrollView>
+        <View style={styles.cameraCard}>
+          <Text style={styles.cameraTitle}>Scan a honey QR</Text>
+          <Text style={styles.cameraBody}>Check a jar or open a harvest record with your phone camera.</Text>
+          {!permission ? (
+            <ActivityIndicator color={colors.honey} style={{ marginTop: 14 }} />
+          ) : !permission.granted ? (
+            <ActionButton label="Allow camera" onPress={requestPermission} variant="quiet" />
+          ) : showCamera ? (
+            <View style={styles.cameraView}>
+              <CameraView
+                style={{ flex: 1 }}
+                facing="back"
+                barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                onBarcodeScanned={({ data }: { data: string }) => {
+                  setLastScan(data);
+                  setShowCamera(false);
+                }}
+              />
+              <Pressable onPress={() => setShowCamera(false)} style={[styles.button, styles.cameraClose]} accessibilityRole="button" accessibilityLabel="Close camera">
+                <Text style={styles.cameraCloseText}>Close</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <ActionButton label="Open camera" onPress={() => setShowCamera(true)} variant="quiet" />
+          )}
+          {lastScan && <Text style={styles.scanResult}>Last scan saved: {lastScan.slice(0, 54)}{lastScan.length > 54 ? "..." : ""}</Text>}
+        </View>
+
+        <Text style={styles.footer}>Honey Chain keeps a clear record from your household to the cooperative.</Text>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
