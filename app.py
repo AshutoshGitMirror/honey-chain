@@ -33,8 +33,32 @@ def postgres_dsn():
     project_ref = os.environ.get("SUPABASE_SIH_PROJECT_REF")
     if password and project_ref:
         encoded = urllib.parse.quote(password, safe="")
-        return f"postgresql://postgres:{encoded}@db.{project_ref}.supabase.co:5432/postgres?sslmode=require"
+        # Prefer Supabase pooler (IPv4) for hosts like Render free tier where direct db.* IPv6 is unreachable.
+        # Pooler host region defaults to ap-south-1 for India; override via SUPABASE_POOLER_HOST if needed.
+        pooler_host = os.environ.get("SUPABASE_POOLER_HOST") or "aws-0-ap-south-1.pooler.supabase.com"
+        pooler_port = os.environ.get("SUPABASE_POOLER_PORT") or "6543"
+        # Use transaction pooler with user postgres.<project_ref>
+        pooler_dsn = f"postgresql://postgres.{project_ref}:{encoded}@{pooler_host}:{pooler_port}/postgres?sslmode=require"
+        # Also keep direct DSN as fallback; caller will try pooler first.
+        return pooler_dsn
     return None
+
+def postgres_dsn_candidates():
+    candidates = []
+    explicit = os.environ.get("SUPABASE_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if explicit:
+        candidates.append(explicit)
+        return candidates
+    password = os.environ.get("SUPABASE_SIH_DATABASE_PASS")
+    project_ref = os.environ.get("SUPABASE_SIH_PROJECT_REF")
+    if password and project_ref:
+        encoded = urllib.parse.quote(password, safe="")
+        pooler_host = os.environ.get("SUPABASE_POOLER_HOST") or "aws-0-ap-south-1.pooler.supabase.com"
+        pooler_port = os.environ.get("SUPABASE_POOLER_PORT") or "6543"
+        candidates.append(f"postgresql://postgres.{project_ref}:{encoded}@{pooler_host}:{pooler_port}/postgres?sslmode=require")
+        # direct as fallback
+        candidates.append(f"postgresql://postgres:{encoded}@db.{project_ref}.supabase.co:5432/postgres?sslmode=require")
+    return candidates
 
 class PostgresConnection:
     is_postgres = True
@@ -54,9 +78,16 @@ class PostgresConnection:
         self.connection.close()
 
 def db():
-    dsn = postgres_dsn()
-    if dsn:
-        return PostgresConnection(dsn)
+    for dsn in postgres_dsn_candidates():
+        try:
+            return PostgresConnection(dsn)
+        except Exception as e:
+            # Log and try next candidate; if all fail, fallback to SQLite instead of crashing deploy
+            try:
+                print(f"[db] postgres connect failed for {dsn.split('@')[-1][:40]}: {e}")
+            except:
+                pass
+            continue
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
@@ -77,12 +108,22 @@ def init_db():
     need_seed = not os.path.exists(DB)
     con = db()
     if getattr(con, "is_postgres", False):
-        with open(POSTGRES_SCHEMA) as f:
-            for statement in f.read().split(";"):
-                statement = statement.strip()
-                if statement:
-                    con.execute(statement)
-        con.commit()
+        try:
+            with open(POSTGRES_SCHEMA) as f:
+                for statement in f.read().split(";"):
+                    statement = statement.strip()
+                    if statement:
+                        con.execute(statement)
+            con.commit()
+        except Exception as e:
+            print(f"[init_db] postgres schema init failed: {e}")
+            con.close()
+            # Fallback to SQLite init
+            con = sqlite3.connect(DB)
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA foreign_keys=ON")
+            with open(SCHEMA) as f:
+                con.executescript(f.read())
     elif need_seed:
         with open(SCHEMA) as f:
             con.executescript(f.read())
@@ -628,7 +669,7 @@ def render_pooled_one(pooled_hash, scan_token=None):
 <div id="qrcode" style="margin-top:12px"></div>
 <script>{qr_js}</script>
 </div>
-<div class="card"><h3>From 5 field harvests</h3><ul>{field_list}</ul></div>
+<div class="card"><h3>From {len(prevs)} field harvests</h3><ul>{field_list}</ul></div>
 {rating}
 """ + HTML_FOOT
 
@@ -747,9 +788,21 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": True, "hash": h, "scan_secret": scan_secret, "verify_url": f"/verify/{h}?s={scan_secret}"}, status=201)
                 else:
                     self.redirect(f"/verify/{h}?s={scan_secret}")
-            except sqlite3.IntegrityError as e:
+            except Exception as e:
+                is_dup = isinstance(e, sqlite3.IntegrityError)
+                if psycopg and hasattr(psycopg, 'errors'):
+                    try:
+                        is_dup = is_dup or isinstance(e, psycopg.errors.UniqueViolation)
+                    except: pass
+                if not is_dup and "duplicate" not in str(e).lower() and "unique" not in str(e).lower():
+                    con.close()
+                    self.send_error(500, str(e))
+                    return
                 con.close()
-                self.send_html(HTML_HEAD + f"<p>Duplicate hash or error: {e}</p><pre>{h}</pre>" + HTML_FOOT)
+                if wants_json:
+                    self.send_json({"error": str(e), "hash": h}, status=409)
+                else:
+                    self.send_html(HTML_HEAD + f"<p>Duplicate hash or error: {e}</p><pre>{h}</pre>" + HTML_FOOT)
         elif path == "/api/hive":
             con = db()
             def f(*keys):
@@ -799,8 +852,22 @@ class Handler(BaseHTTPRequestHandler):
                 # keep token in redirect so QR stays valid
                 qs = f"?s={scan_secret}" if scan_secret else ""
                 self.redirect(f"/verify/{b_hash}{qs}")
-            except sqlite3.IntegrityError:
+            except Exception as e:
+                is_dup = isinstance(e, sqlite3.IntegrityError)
+                if psycopg and hasattr(psycopg, 'errors'):
+                    try:
+                        is_dup = is_dup or isinstance(e, psycopg.errors.UniqueViolation)
+                    except: pass
+                if not is_dup and "duplicate" not in str(e).lower() and "unique" not in str(e).lower():
+                    con.close()
+                    self.send_error(500, str(e))
+                    return
                 con.close()
+                if d.get("scan_secret") or d.get("batch_hash"):
+                    wants = self.headers.get("Content-Type","").split(";",1)[0].strip().lower()=="application/json"
+                    if wants:
+                        self.send_json({"error": "duplicate rating", "detail": str(e)}, status=409)
+                        return
                 self.send_html(HTML_HEAD + "<p>You already rated this batch with that scan token.</p><a href='/'>back</a>" + HTML_FOOT)
         elif path == "/api/pooled":
             con = db()
@@ -822,10 +889,16 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("INSERT INTO pooled_lot (plant_name, plant_date, pooled_hash, prev_hashes, weight_kg, scan_secret) VALUES (?,?,?,?,?,?)",
                             (plant_name, plant_date, phash, json.dumps(prevs), weight, scan_secret))
                 con.commit(); con.close()
-                self.redirect(f"/pooled/{phash}?s={scan_secret}")
+                if wants_json:
+                    self.send_json({"ok": True, "pooled_hash": phash, "scan_secret": scan_secret, "pooled_url": f"/pooled/{phash}?s={scan_secret}"}, status=201)
+                else:
+                    self.redirect(f"/pooled/{phash}?s={scan_secret}")
             except Exception as e:
                 con.close()
-                self.send_html(HTML_HEAD + f"<p>Pool error: {e}</p><a href='/pooled'>back</a>" + HTML_FOOT)
+                if wants_json:
+                    self.send_json({"error": str(e)}, status=400)
+                else:
+                    self.send_html(HTML_HEAD + f"<p>Pool error: {e}</p><a href='/pooled'>back</a>" + HTML_FOOT)
         elif path == "/api/rate_pooled":
             con = db()
             try:
