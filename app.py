@@ -25,6 +25,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE_DIR, "honeychain.db")
 SCHEMA = os.path.join(BASE_DIR, "schema.sql")
 POSTGRES_SCHEMA = os.path.join(BASE_DIR, "supabase", "schema.sql")
+SYNC_QUEUE_SQL = "CREATE TABLE IF NOT EXISTS sync_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, payload TEXT NOT NULL, attempts INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), synced INTEGER DEFAULT 0)"
 
 def postgres_dsn():
     explicit = os.environ.get("SUPABASE_DATABASE_URL") or os.environ.get("DATABASE_URL")
@@ -93,6 +94,103 @@ def db():
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
     return con
+
+def enqueue_sync(table_name, payload):
+    try:
+        qcon = sqlite3.connect(DB)
+        qcon.execute(SYNC_QUEUE_SQL)
+        qcon.execute("INSERT INTO sync_queue (table_name, payload) VALUES (?, ?)", (table_name, json.dumps(payload)))
+        qcon.commit()
+        qcon.close()
+        print(f"[queue] enqueued {table_name} for later postgres sync")
+    except Exception as e:
+        try:
+            print(f"[queue] enqueue failed {e}")
+        except:
+            pass
+
+def flush_queue():
+    pg = None
+    for dsn in postgres_dsn_candidates():
+        try:
+            pg = PostgresConnection(dsn)
+            break
+        except Exception:
+            continue
+    if pg is None:
+        try:
+            qcon = sqlite3.connect(DB)
+            qcon.execute(SYNC_QUEUE_SQL)
+            pend = qcon.execute("SELECT COUNT(*) FROM sync_queue WHERE synced=0").fetchone()[0]
+            total = qcon.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0]
+            qcon.close()
+            return {"ok": False, "reason": "postgres unreachable", "flushed": 0, "pending": pend, "total": total}
+        except:
+            return {"ok": False, "reason": "postgres unreachable", "flushed": 0, "pending": 0}
+    try:
+        qcon = sqlite3.connect(DB)
+        qcon.row_factory = sqlite3.Row
+        qcon.execute(SYNC_QUEUE_SQL)
+        rows = qcon.execute("SELECT * FROM sync_queue WHERE synced=0 ORDER BY id").fetchall()
+        pending = len(rows)
+        if pending == 0:
+            qcon.close()
+            pg.close()
+            return {"ok": True, "flushed": 0, "pending": 0}
+        flushed = 0
+        for r in rows:
+            table = r["table_name"]
+            payload = json.loads(r["payload"])
+            try:
+                if table == "batch":
+                    pg.execute("INSERT INTO batch (beekeeper_id, hive_id, harvest_date, location, honey_type, flower_source, horticulture_notes, harvest_method, weight_kg, prev_hash, hash, scan_secret) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (hash) DO NOTHING", (payload.get("beekeeper_id"), payload.get("hive_id"), payload.get("harvest_date"), payload.get("location"), payload.get("honey_type"), payload.get("flower_source"), payload.get("horticulture_notes"), payload.get("harvest_method"), payload.get("weight_kg"), payload.get("prev_hash"), payload.get("hash"), payload.get("scan_secret")))
+                elif table == "hive_reading":
+                    pg.execute("INSERT INTO hive_reading (hive_id, beekeeper_id, temperature, humidity, weight, sound_db, flag) VALUES (%s,%s,%s,%s,%s,%s,%s)", (payload.get("hive_id"), payload.get("beekeeper_id"), payload.get("temperature"), payload.get("humidity"), payload.get("weight"), payload.get("sound_db"), payload.get("flag")))
+                elif table == "pooled_lot":
+                    prevs = payload.get("prev_hashes")
+                    if isinstance(prevs, list):
+                        prevs = json.dumps(prevs)
+                    pg.execute("INSERT INTO pooled_lot (plant_name, plant_date, pooled_hash, prev_hashes, weight_kg, scan_secret) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (pooled_hash) DO NOTHING", (payload.get("plant_name"), payload.get("plant_date"), payload.get("pooled_hash"), prevs, payload.get("weight_kg"), payload.get("scan_secret")))
+                elif table == "rating":
+                    pg.execute("INSERT INTO rating (beekeeper_id, batch_hash, scan_secret, consumer_id, stars) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (batch_hash, scan_secret) DO NOTHING", (payload.get("beekeeper_id"), payload.get("batch_hash"), payload.get("scan_secret"), payload.get("consumer_id"), payload.get("stars")))
+                    try:
+                        avg = pg.execute("SELECT AVG(stars) as a, COUNT(*) as c FROM rating WHERE beekeeper_id=%s", (payload.get("beekeeper_id"),)).fetchone()
+                        pg.execute("UPDATE beekeeper SET rating_avg=%s, rating_count=%s WHERE id=%s", (avg["a"], avg["c"], payload.get("beekeeper_id")))
+                    except:
+                        pass
+                elif table == "beekeeper":
+                    pg.execute("INSERT INTO beekeeper (name, phone, village, experience_years, bio, upi_id, promotion_opt_in, photo_url, collective_name, latitude, longitude, site_people) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (payload.get("name"), payload.get("phone"), payload.get("village"), payload.get("experience_years"), payload.get("bio"), payload.get("upi_id"), payload.get("promotion_opt_in"), payload.get("photo_url"), payload.get("collective_name"), payload.get("latitude"), payload.get("longitude"), payload.get("site_people")))
+                else:
+                    raise ValueError(f"unknown table {table}")
+                pg.connection.commit()
+                qcon.execute("UPDATE sync_queue SET synced=1 WHERE id=?", (r["id"],))
+                qcon.commit()
+                flushed += 1
+            except Exception as e:
+                is_dup = "duplicate" in str(e).lower() or "unique" in str(e).lower()
+                if psycopg and hasattr(psycopg, 'errors'):
+                    try:
+                        is_dup = is_dup or isinstance(e, psycopg.errors.UniqueViolation)
+                    except:
+                        pass
+                if is_dup:
+                    qcon.execute("UPDATE sync_queue SET synced=1 WHERE id=?", (r["id"],))
+                    qcon.commit()
+                    flushed += 1
+                else:
+                    qcon.execute("UPDATE sync_queue SET attempts=attempts+1 WHERE id=?", (r["id"],))
+                    qcon.commit()
+                    print(f"[queue] flush row {r['id']} {table} failed: {e}")
+                    continue
+        qcon.close()
+        pg.close()
+        return {"ok": True, "flushed": flushed, "pending": pending - flushed}
+    except Exception as e:
+        try:
+            pg.close()
+        except:
+            pass
+        return {"ok": False, "error": str(e), "flushed": 0}
 
 def column_exists(con, table, col):
     if getattr(con, "is_postgres", False):
@@ -166,6 +264,13 @@ def init_db():
                     ("Kareem Ali", "Nashik MH", 6, "Ber honey, 8 boxes near orchard.", "Nashik Madhu Collective", 20.015, 73.795))
         con.commit()
     con.close()
+    try:
+        qcon = sqlite3.connect(DB)
+        qcon.execute(SYNC_QUEUE_SQL)
+        qcon.commit()
+        qcon.close()
+    except:
+        pass
     db._initialized = True
 
 def sha256(s: str) -> str:
@@ -736,6 +841,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(rows)
         elif path == "/health":
             self.send_json({"ok": True})
+        elif path == "/api/queue-status":
+            try:
+                qcon = sqlite3.connect(DB)
+                qcon.execute(SYNC_QUEUE_SQL)
+                pend = qcon.execute("SELECT COUNT(*) FROM sync_queue WHERE synced=0").fetchone()[0]
+                total = qcon.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0]
+                qcon.close()
+                # check postgres reachability
+                pg_ok = False
+                for dsn in postgres_dsn_candidates():
+                    try:
+                        pc = PostgresConnection(dsn)
+                        pc.close()
+                        pg_ok = True
+                        break
+                    except:
+                        continue
+                self.send_json({"pending": pend, "total": total, "postgres_ok": pg_ok})
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
         else:
             self.send_error(404)
 
@@ -760,9 +885,17 @@ class Handler(BaseHTTPRequestHandler):
             d = {k: v[0] for k, v in form_data.items()}
         if path == "/api/beekeeper":
             con = db()
+            is_pg = getattr(con, "is_postgres", False)
             con.execute("INSERT INTO beekeeper (name, phone, village, experience_years, bio, upi_id, promotion_opt_in, photo_url, collective_name, latitude, longitude, site_people) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         (d.get("name"), d.get("phone"), d.get("village"), int(d.get("experience_years") or 0), d.get("bio"), d.get("upi_id"), int(d.get("promotion_opt_in") or 0), d.get("photo_url"), d.get("collective_name"), float(d.get("latitude") or 0) or None, float(d.get("longitude") or 0) or None, d.get("site_people")))
             con.commit(); con.close()
+            if not is_pg:
+                enqueue_sync("beekeeper", {"name": d.get("name"), "phone": d.get("phone"), "village": d.get("village"), "experience_years": int(d.get("experience_years") or 0), "bio": d.get("bio"), "upi_id": d.get("upi_id"), "promotion_opt_in": int(d.get("promotion_opt_in") or 0), "photo_url": d.get("photo_url"), "collective_name": d.get("collective_name"), "latitude": float(d.get("latitude") or 0) or None, "longitude": float(d.get("longitude") or 0) or None, "site_people": d.get("site_people")})
+            else:
+                try:
+                    flush_queue()
+                except:
+                    pass
             self.redirect("/beekeeper")
         elif path.startswith("/api/beekeeper/") and path.endswith("/update"):
             try:
@@ -801,7 +934,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 con.execute("INSERT INTO batch (beekeeper_id, hive_id, harvest_date, location, honey_type, flower_source, horticulture_notes, harvest_method, weight_kg, prev_hash, hash, scan_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                             (beekeeper_id, hive_id, harvest_date, location, honey_type, flower, d.get("horticulture_notes"), d.get("harvest_method"), float(d.get("weight_kg") or 0) or None, prev, h, scan_secret))
+                is_pg = getattr(con, "is_postgres", False)
                 con.commit(); con.close()
+                if not is_pg:
+                    enqueue_sync("batch", {"beekeeper_id": beekeeper_id, "hive_id": hive_id, "harvest_date": harvest_date, "location": location, "honey_type": honey_type, "flower_source": flower, "horticulture_notes": d.get("horticulture_notes"), "harvest_method": d.get("harvest_method"), "weight_kg": float(d.get("weight_kg") or 0) or None, "prev_hash": prev, "hash": h, "scan_secret": scan_secret})
+                else:
+                    try:
+                        flush_queue()
+                    except:
+                        pass
                 if wants_json:
                     self.send_json({"ok": True, "hash": h, "scan_secret": scan_secret, "verify_url": f"/verify/{h}?s={scan_secret}"}, status=201)
                 else:
@@ -835,9 +976,17 @@ class Handler(BaseHTTPRequestHandler):
                 if prev and prev["weight"]:
                     if weight < prev["weight"]*0.9:
                         flag = (flag + ", weight drop") if flag!="ok" else "weight drop"
+            is_pg_hive = getattr(con, "is_postgres", False)
             con.execute("INSERT INTO hive_reading (hive_id, beekeeper_id, temperature, humidity, weight, sound_db, flag) VALUES (?,?,?,?,?,?,?)",
                         (hive_id, beekeeper_id, temp, hum, weight, sound, flag))
             con.commit(); con.close()
+            if not is_pg_hive:
+                enqueue_sync("hive_reading", {"hive_id": hive_id, "beekeeper_id": beekeeper_id, "temperature": temp, "humidity": hum, "weight": weight, "sound_db": sound, "flag": flag})
+            else:
+                try:
+                    flush_queue()
+                except:
+                    pass
             if wants_json:
                 self.send_json({"ok": True, "flag": flag}, status=201)
             else:
@@ -866,7 +1015,15 @@ class Handler(BaseHTTPRequestHandler):
                             (int(d.get("beekeeper_id")), b_hash, scan_secret, d.get("consumer_id"), stars))
                 avg = con.execute("SELECT AVG(stars) as a, COUNT(*) as c FROM rating WHERE beekeeper_id=?", (int(d.get("beekeeper_id")),)).fetchone()
                 con.execute("UPDATE beekeeper SET rating_avg=?, rating_count=? WHERE id=?", (avg["a"], avg["c"], int(d.get("beekeeper_id"))))
+                is_pg_rate = getattr(con, "is_postgres", False)
                 con.commit(); con.close()
+                if not is_pg_rate:
+                    enqueue_sync("rating", {"beekeeper_id": int(d.get("beekeeper_id")), "batch_hash": b_hash, "scan_secret": scan_secret, "consumer_id": d.get("consumer_id"), "stars": stars})
+                else:
+                    try:
+                        flush_queue()
+                    except:
+                        pass
                 # keep token in redirect so QR stays valid
                 qs = f"?s={scan_secret}" if scan_secret else ""
                 self.redirect(f"/verify/{b_hash}{qs}")
@@ -904,9 +1061,17 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 phash = pooled_hash(prevs, plant_name, plant_date)
                 scan_secret = secrets.token_hex(8)
+                is_pg_pooled = getattr(con, "is_postgres", False)
                 con.execute("INSERT INTO pooled_lot (plant_name, plant_date, pooled_hash, prev_hashes, weight_kg, scan_secret) VALUES (?,?,?,?,?,?)",
                             (plant_name, plant_date, phash, json.dumps(prevs), weight, scan_secret))
                 con.commit(); con.close()
+                if not is_pg_pooled:
+                    enqueue_sync("pooled_lot", {"plant_name": plant_name, "plant_date": plant_date, "pooled_hash": phash, "prev_hashes": prevs, "weight_kg": weight, "scan_secret": scan_secret})
+                else:
+                    try:
+                        flush_queue()
+                    except:
+                        pass
                 if wants_json:
                     self.send_json({"ok": True, "pooled_hash": phash, "scan_secret": scan_secret, "pooled_url": f"/pooled/{phash}?s={scan_secret}"}, status=201)
                 else:
@@ -948,12 +1113,24 @@ class Handler(BaseHTTPRequestHandler):
                             (bid, phash, scan_secret, stars))
                 avg = con.execute("SELECT AVG(stars) as a, COUNT(*) as c FROM rating WHERE beekeeper_id=?", (bid,)).fetchone()
                 con.execute("UPDATE beekeeper SET rating_avg=?, rating_count=? WHERE id=?", (avg["a"], avg["c"], bid))
+                is_pg_rp = getattr(con, "is_postgres", False)
                 con.commit(); con.close()
+                if not is_pg_rp:
+                    enqueue_sync("rating", {"beekeeper_id": bid, "batch_hash": phash, "scan_secret": scan_secret, "stars": stars})
+                else:
+                    try:
+                        flush_queue()
+                    except:
+                        pass
                 qs = f"?s={scan_secret}" if scan_secret else ""
                 self.redirect(f"/pooled/{phash}{qs}")
             except Exception as e:
                 con.close()
                 self.send_html(HTML_HEAD + f"<p>Rate pooled error: {e}</p><a href='/pooled'>back</a>" + HTML_FOOT)
+        elif path == "/api/flush-queue":
+            res = flush_queue()
+            status = 200 if res.get("ok") else 502
+            self.send_json(res, status=status)
         else:
             self.send_error(404)
 
