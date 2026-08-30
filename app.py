@@ -355,6 +355,11 @@ def render_verify(hash_val, scan_token=None):
 <small>{batch["latitude"]}, {batch["longitude"]} — household farm</small>
 </div>
 '''
+    # Packer / AGMARK per vision: packer writes after lab
+    if batch["ca_number"] or batch["packer_name"] or batch["lot_number"]:
+        packer_block = f'<div class="card"><h3>Packing & Cert — AGMARK</h3><p>CA: {batch["ca_number"] or "-"} | Packer: {batch["packer_name"] or "-"} | Lot: {batch["lot_number"] or "-"} | Packing: {batch["packing_date"] or "-"} | Best before: {batch["best_before"] or "-"} | MRP: {batch["mrp"] or "-"} | Net: {batch["net_weight"] or "-"} kg</p><p><span class="ok">Certified</span> — AGMARK</p></div>'
+    else:
+        packer_block = '<div class="card"><h3>Packing & Cert</h3><p><small>Not yet packed — label written after NABL lab per AGMARK 2008/2024.</small></p></div>' 
     photo = batch["photo_url"]
     photo_tag = f'<img class="avatar" src="{photo}" onerror="this.style.display=\'none\'">' if photo else ""
     collective = batch["collective_name"] or "-"
@@ -377,6 +382,7 @@ def render_verify(hash_val, scan_token=None):
 <p>Method: {batch["harvest_method"] or "-"} | Weight: {batch["weight_kg"] or "-"} kg</p>
 <p>Prev hash: <small>{batch["prev_hash"] or "genesis"}</small></p>
 </div>
+{packer_block}
 <div class="card">
 <h3>Know your beekeeper {photo_tag}</h3>
 <p><strong>{batch["name"]}</strong> — {batch["village"]} <span class="badge">{collective}</span></p>

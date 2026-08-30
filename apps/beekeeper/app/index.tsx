@@ -43,13 +43,17 @@ function initDb() {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     beekeeper_id TEXT, hive_id TEXT, harvest_date TEXT, location TEXT,
     floral_source TEXT, honey_type TEXT, weight_kg REAL,
+    horticulture_notes TEXT, harvest_method TEXT,
     latitude REAL, longitude REAL, prev_hash TEXT, hash TEXT, synced INTEGER DEFAULT 0
   );`);
   d.execSync(`CREATE TABLE IF NOT EXISTS hive_pending (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    hive_id TEXT, temp_c REAL, humidity REAL, weight_kg REAL, notes TEXT,
+    hive_id TEXT, temp_c REAL, humidity REAL, weight_kg REAL, sound_db REAL, notes TEXT,
     latitude REAL, longitude REAL, ts TEXT, synced INTEGER DEFAULT 0
   );`);
+  try { d.execSync(`ALTER TABLE batch_pending ADD COLUMN horticulture_notes TEXT`); } catch {}
+  try { d.execSync(`ALTER TABLE batch_pending ADD COLUMN harvest_method TEXT`); } catch {}
+  try { d.execSync(`ALTER TABLE hive_pending ADD COLUMN sound_db REAL`); } catch {}
 }
 
 type Harvest = {
@@ -57,6 +61,8 @@ type Harvest = {
   floral_source: string;
   honey_type: string;
   weight_kg: string;
+  horticulture_notes: string;
+  harvest_method: string;
 };
 
 type HiveLog = {
@@ -64,6 +70,7 @@ type HiveLog = {
   temp_c: string;
   humidity: string;
   weight_kg: string;
+  sound_db: string;
   notes: string;
 };
 
@@ -302,8 +309,8 @@ export default function Home() {
   const [permission, requestPermission] = useCameraPermissions();
   const [showCamera, setShowCamera] = useState(false);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [harvest, setHarvest] = useState<Harvest>({ hive_id: "", floral_source: "", honey_type: "", weight_kg: "" });
-  const [hive, setHive] = useState<HiveLog>({ hive_id: "", temp_c: "", humidity: "", weight_kg: "", notes: "" });
+  const [harvest, setHarvest] = useState<Harvest>({ hive_id: "", floral_source: "", honey_type: "", weight_kg: "", horticulture_notes: "", harvest_method: "" });
+  const [hive, setHive] = useState<HiveLog>({ hive_id: "", temp_c: "", humidity: "", weight_kg: "", sound_db: "", notes: "" });
   const [lastScan, setLastScan] = useState<string | null>(null);
   const [tab, setTab] = useState<"harvest" | "hive" | "profile">("harvest");
   const [saving, setSaving] = useState(false);
@@ -362,6 +369,8 @@ export default function Home() {
       floral_source: harvest.floral_source.trim(),
       honey_type: harvest.honey_type.trim(),
       weight_kg: Number(harvest.weight_kg) || 0,
+      horticulture_notes: harvest.horticulture_notes.trim(),
+      harvest_method: harvest.harvest_method.trim(),
       latitude: coords?.lat ?? null,
       longitude: coords?.lng ?? null,
       prev_hash: "",
@@ -369,8 +378,8 @@ export default function Home() {
     };
     if (d) {
       d.runSync(
-        `INSERT INTO batch_pending (beekeeper_id,hive_id,harvest_date,location,floral_source,honey_type,weight_kg,latitude,longitude,prev_hash,hash,synced) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)`,
-        [row.beekeeper_id, row.hive_id, row.harvest_date, row.location, row.floral_source, row.honey_type, row.weight_kg, row.latitude, row.longitude, row.prev_hash, row.hash]
+        `INSERT INTO batch_pending (beekeeper_id,hive_id,harvest_date,location,floral_source,honey_type,weight_kg,horticulture_notes,harvest_method,latitude,longitude,prev_hash,hash,synced) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+        [row.beekeeper_id, row.hive_id, row.harvest_date, row.location, row.floral_source, row.honey_type, row.weight_kg, row.horticulture_notes, row.harvest_method, row.latitude, row.longitude, row.prev_hash, row.hash]
       );
     }
     try {
@@ -385,7 +394,7 @@ export default function Home() {
     setSaving(false);
     queryClient.invalidateQueries({ queryKey: ["pending"] });
     Alert.alert("Harvest saved", `Record ${hash} is safe on this phone and ready to sync.`);
-    setHarvest({ hive_id: "", floral_source: "", honey_type: "", weight_kg: "" });
+    setHarvest({ hive_id: "", floral_source: "", honey_type: "", weight_kg: "", horticulture_notes: "", harvest_method: "" });
   }, [coords, harvest, queryClient]);
 
   const addHive = useCallback(async () => {
@@ -400,14 +409,15 @@ export default function Home() {
       temp_c: Number(hive.temp_c) || 0,
       humidity: Number(hive.humidity) || 0,
       weight_kg: Number(hive.weight_kg) || 0,
+      sound_db: Number(hive.sound_db) || 0,
       notes: hive.notes.trim(),
       latitude: coords?.lat ?? null,
       longitude: coords?.lng ?? null,
       ts: new Date().toISOString(),
     };
     if (d) {
-      d.runSync(`INSERT INTO hive_pending (hive_id,temp_c,humidity,weight_kg,notes,latitude,longitude,ts,synced) VALUES (?,?,?,?,?,?,?, ?,0)`, [
-        row.hive_id, row.temp_c, row.humidity, row.weight_kg, row.notes, row.latitude, row.longitude, row.ts,
+      d.runSync(`INSERT INTO hive_pending (hive_id,temp_c,humidity,weight_kg,sound_db,notes,latitude,longitude,ts,synced) VALUES (?,?,?,?,?,?,?,?,?,0)`, [
+        row.hive_id, row.temp_c, row.humidity, row.weight_kg, row.sound_db, row.notes, row.latitude, row.longitude, row.ts,
       ]);
     }
     try {
@@ -422,7 +432,7 @@ export default function Home() {
     setSaving(false);
     queryClient.invalidateQueries({ queryKey: ["pending"] });
     Alert.alert("Hive check saved", "The check is safe on this phone and ready to sync.");
-    setHive({ hive_id: "", temp_c: "", humidity: "", weight_kg: "", notes: "" });
+    setHive({ hive_id: "", temp_c: "", humidity: "", weight_kg: "", sound_db: "", notes: "" });
   }, [coords, hive, queryClient]);
 
   const pending = (pendingQuery.data?.batch ?? 0) + (pendingQuery.data?.hive ?? 0);
@@ -497,6 +507,8 @@ export default function Home() {
             <Field label="Flower nearby" placeholder="For example, mustard" value={harvest.floral_source} onChangeText={(value) => setHarvest((current) => ({ ...current, floral_source: value }))} />
             <Field label="Honey kind" placeholder="For example, raw honey" value={harvest.honey_type} onChangeText={(value) => setHarvest((current) => ({ ...current, honey_type: value }))} />
             <Field label="How much? (kg)" placeholder="For example, 12" value={harvest.weight_kg} onChangeText={(value) => setHarvest((current) => ({ ...current, weight_kg: value }))} keyboardType="numeric" />
+            <Field label="Harvest method" placeholder="manual or extractor" value={harvest.harvest_method} onChangeText={(value) => setHarvest((current) => ({ ...current, harvest_method: value }))} />
+            <Field label="Horticulture notes" placeholder="crop, season, health" value={harvest.horticulture_notes} onChangeText={(value) => setHarvest((current) => ({ ...current, horticulture_notes: value }))} />
             <ActionButton label="Save harvest" onPress={addHarvest} disabled={saving} />
             <Text style={styles.footer}>No signal is okay. The phone saves first and sends later.</Text>
           </View>
@@ -513,6 +525,7 @@ export default function Home() {
               <View style={styles.halfField}><Field label="Humidity (%)" placeholder="60" value={hive.humidity} onChangeText={(value) => setHive((current) => ({ ...current, humidity: value }))} keyboardType="numeric" /></View>
             </View>
             <Field label="Hive weight (kg)" placeholder="For example, 28" value={hive.weight_kg} onChangeText={(value) => setHive((current) => ({ ...current, weight_kg: value }))} keyboardType="numeric" />
+            <Field label="Sound (dB)" placeholder="For example, 72" value={hive.sound_db} onChangeText={(value) => setHive((current) => ({ ...current, sound_db: value }))} keyboardType="numeric" />
             <Field label="What did you see?" placeholder="For example, queen seen" value={hive.notes} onChangeText={(value) => setHive((current) => ({ ...current, notes: value }))} />
             <ActionButton label="Save hive check" onPress={addHive} disabled={saving} />
           </View>
