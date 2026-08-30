@@ -5,6 +5,7 @@ Run: python3 app.py
 Open: http://localhost:8000
 """
 import hashlib
+import html
 import json
 import sqlite3
 import os
@@ -142,6 +143,17 @@ def init_db():
                 con.execute("ALTER TABLE rating ADD COLUMN scan_secret TEXT")
             except sqlite3.OperationalError:
                 pass
+        # fix pooled rating FK: rating.batch_hash originally REFERENCES batch(hash) blocks pooled lots. Remove FK per vision DAG.
+        try:
+            fk = list(con.execute("PRAGMA foreign_key_list(rating)").fetchall())
+            has_batch_fk = any(r["table"] == "batch" for r in fk)
+            if has_batch_fk:
+                con.execute("ALTER TABLE rating RENAME TO rating_old")
+                con.execute("CREATE TABLE rating (id INTEGER PRIMARY KEY AUTOINCREMENT, beekeeper_id INTEGER NOT NULL REFERENCES beekeeper(id), batch_hash TEXT NOT NULL, scan_secret TEXT, consumer_id TEXT, stars INTEGER CHECK(stars BETWEEN 1 AND 5), created_at TEXT DEFAULT (datetime('now')), UNIQUE(batch_hash, scan_secret))")
+                con.execute("INSERT INTO rating (id, beekeeper_id, batch_hash, scan_secret, consumer_id, stars, created_at) SELECT id, beekeeper_id, batch_hash, scan_secret, consumer_id, stars, created_at FROM rating_old")
+                con.execute("DROP TABLE rating_old")
+        except Exception:
+            pass
         con.commit()
     # seed if empty
     cnt = con.execute("SELECT COUNT(*) as c FROM beekeeper").fetchone()["c"]
@@ -361,7 +373,7 @@ def render_verify(hash_val, scan_token=None):
     else:
         packer_block = '<div class="card"><h3>Packing & Cert</h3><p><small>Not yet packed — label written after NABL lab per AGMARK 2008/2024.</small></p></div>' 
     photo = batch["photo_url"]
-    photo_tag = f'<img class="avatar" src="{photo}" onerror="this.style.display=\'none\'">' if photo else ""
+    photo_tag = f'<img class="avatar" src="{html.escape(photo, quote=True)}" onerror="this.style.display=\'none\'">' if photo else ""
     collective = batch["collective_name"] or "-"
     qr_token = batch["scan_secret"]
     qr_js = f"new QRCode(document.getElementById('qrcode'), {{text: window.location.origin + '/verify/{hash_val}?s={qr_token}', width: 160, height: 160}});" if qr_token else "new QRCode(document.getElementById('qrcode'), {text: window.location.href, width: 160, height: 160});"
@@ -405,7 +417,7 @@ def render_beekeeper_list():
     for r in rows:
         promo = " <span class=badge>promoted</span>" if r["promotion_opt_in"] else ""
         collective = f'<span class="badge">{r["collective_name"]}</span>' if r["collective_name"] else ""
-        photo = f'<img class="avatar" src="{r["photo_url"]}" onerror="this.style.display=\'none\'">' if r["photo_url"] else ""
+        photo = f'<img class="avatar" src="{html.escape(r["photo_url"], quote=True)}" onerror="this.style.display=\'none\'">' if r["photo_url"] else ""
         cards += f'<div class="card" style="display:flex;gap:12px;align-items:center"><div>{photo}</div><div><h3 style="margin:0">{r["name"]}{promo} {collective}</h3><div>{r["village"]} — {r["experience_years"]} yrs</div><p>{r["bio"] or ""}</p><div>Rating {r["rating_avg"]:.1f} ({r["rating_count"]})</div><div><a href="/beekeeper/{r["id"]}">Profile</a> {"<a href=\"/collective/"+urllib.parse.quote(r["collective_name"])+"\" style=\"margin-left:8px\">Collective</a>" if r["collective_name"] else ""}</div></div></div>'
     return HTML_HEAD + f"""
 <h2>Beekeepers</h2>
@@ -449,7 +461,7 @@ def render_beekeeper_one(bid):
     reading_list = "".join(f'<div>{x["recorded_at"]}: temp {x["temperature"]}C hum {x["humidity"]}% weight {x["weight"]}kg — {x["flag"]}</div>' for x in readings) or "<p>No readings</p>"
     upi = r["upi_id"]
     upi_line = f'<p>UPI: {upi[:2]}***{upi[-4:]} <small>consent needed</small></p>' if upi else "<p>No UPI shared</p>"
-    photo_block = f'<img class="photo" src="{r["photo_url"]}" onerror="this.style.display=\'none\'">' if r["photo_url"] else "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#999'>no photo</div>"
+    photo_block = f'<img class="photo" src="{html.escape(r["photo_url"], quote=True)}" onerror="this.style.display=\'none\'">' if r["photo_url"] else "<div class='photo' style='display:flex;align-items:center;justify-content:center;color:#999'>no photo</div>"
     # site people parse
     site_people_raw = r["site_people"] or ""
     try:
@@ -529,7 +541,7 @@ def render_promotion():
     else:
         body = ""
         for r in rows:
-            photo = f'<img class="avatar" src="{r["photo_url"]}" onerror="this.style.display=\'none\'">' if r["photo_url"] else ""
+            photo = f'<img class="avatar" src="{html.escape(r["photo_url"], quote=True)}" onerror="this.style.display=\'none\'">' if r["photo_url"] else ""
             collective = f' <span class="badge">{r["collective_name"]}</span>' if r["collective_name"] else ""
             body += f'<div class="card" style="display:flex;gap:12px"><div>{photo}</div><div><h3 style="margin:0">{r["name"]}{collective} <span class="badge">{r["rating_avg"]:.1f} stars</span></h3><div>{r["village"]} — {r["experience_years"]} yrs</div><p>{r["bio"] or ""}</p><div>Last harvest: {r["last_harvest"] or "-"}</div><div><a href="/beekeeper/{r["id"]}">View and support</a> | <a href="/collective/{urllib.parse.quote(r["collective_name"] or "")}">Collective</a></div></div></div>'
     return HTML_HEAD + f"<h2>Promotion tab</h2><p>Beekeepers who opted in, sorted by rating and recent harvest. Shows photo and collective.</p>{body}" + HTML_FOOT
@@ -583,7 +595,7 @@ def render_collective_one(name):
     con.close()
     batch_html = "".join(f'<div><a href="/verify/{b["hash"]}">{b["harvest_date"]} — {b["flower_source"] or "honey"} — {b["name"]} — {b["hive_id"]}</a></div>' for b in batches) or "<p>No batches for this site yet.</p>"
     people_html = "".join(f"<li>{p}</li>" for p in all_people) or "<li>no detail</li>"
-    member_html = "".join(f'<div class="card" style="display:flex;gap:12px"><img class="avatar" src="{m["photo_url"] or ""}" onerror="this.style.display=\'none\'"><div><strong><a href="/beekeeper/{m["id"]}">{m["name"]}</a></strong> — {m["village"]} — {m["experience_years"]} yrs<br>{m["bio"] or ""}<br>Rating {m["rating_avg"]:.1f} ({m["rating_count"]})</div></div>' for m in members)
+    member_html = "".join(f'<div class="card" style="display:flex;gap:12px"><img class="avatar" src="{html.escape(m["photo_url"] or "", quote=True)}" onerror="this.style.display=\'none\'"><div><strong><a href="/beekeeper/{m["id"]}">{m["name"]}</a></strong> — {m["village"]} — {m["experience_years"]} yrs<br>{m["bio"] or ""}<br>Rating {m["rating_avg"]:.1f} ({m["rating_count"]})</div></div>' for m in members)
     return HTML_HEAD + f"""
 <h2>{name}</h2>
 <div class="grid">

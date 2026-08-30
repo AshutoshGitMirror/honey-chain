@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS pooled_lot (
 CREATE TABLE IF NOT EXISTS rating (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   beekeeper_id INTEGER NOT NULL REFERENCES beekeeper(id),
-  batch_hash TEXT NOT NULL REFERENCES batch(hash),
+  batch_hash TEXT NOT NULL,
   scan_secret TEXT,
   consumer_id TEXT,
   stars INTEGER CHECK(stars BETWEEN 1 AND 5),
