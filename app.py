@@ -861,6 +861,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"pending": pend, "total": total, "postgres_ok": pg_ok})
             except Exception as e:
                 self.send_json({"error": str(e)}, status=500)
+        elif path == "/api/debug-pg":
+            results = []
+            for dsn in postgres_dsn_candidates():
+                try:
+                    pc = PostgresConnection(dsn)
+                    pc.execute("SELECT 1 as ok").fetchone()
+                    pc.close()
+                    results.append({"dsn": dsn.split("@")[-1][:80], "ok": True})
+                    break
+                except Exception as e:
+                    results.append({"dsn": dsn.split("@")[-1][:80], "ok": False, "error": str(e)[:400]})
+            import socket
+            hosts = ["aws-0-ap-south-1.pooler.supabase.com", "aws-1-ap-south-1.pooler.supabase.com", "db.jlwgmqwhqrweumngvfqa.supabase.co", "aws-0-us-east-1.pooler.supabase.com", "aws-0-eu-central-1.pooler.supabase.com"]
+            resolves = {}
+            for h in hosts:
+                try:
+                    ip = socket.gethostbyname(h)
+                    resolves[h] = ip
+                except Exception as e:
+                    resolves[h] = f"fail {e}"
+            self.send_json({"candidates": results, "resolves": resolves, "env_has_pass": bool(os.environ.get("SUPABASE_SIH_DATABASE_PASS")), "env_has_ref": bool(os.environ.get("SUPABASE_SIH_PROJECT_REF")), "env_pooler_host": os.environ.get("SUPABASE_POOLER_HOST")})
         else:
             self.send_error(404)
 
