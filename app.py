@@ -55,10 +55,14 @@ def postgres_dsn_candidates():
     project_ref = os.environ.get("SUPABASE_SIH_PROJECT_REF")
     if password and project_ref:
         encoded = urllib.parse.quote(password, safe="")
-        pooler_host = os.environ.get("SUPABASE_POOLER_HOST") or "aws-0-ap-south-1.pooler.supabase.com"
-        pooler_port = os.environ.get("SUPABASE_POOLER_PORT") or "6543"
-        candidates.append(f"postgresql://postgres.{project_ref}:{encoded}@{pooler_host}:{pooler_port}/postgres?sslmode=require")
-        # direct as fallback
+        env_host = os.environ.get("SUPABASE_POOLER_HOST")
+        env_port = os.environ.get("SUPABASE_POOLER_PORT") or "6543"
+        if env_host:
+            candidates.append(f"postgresql://postgres.{project_ref}:{encoded}@{env_host}:{env_port}/postgres?sslmode=require")
+        else:
+            for host in ["aws-0-ap-south-1.pooler.supabase.com", "aws-1-ap-south-1.pooler.supabase.com", "aws-0-ap-southeast-1.pooler.supabase.com", "aws-0-us-east-1.pooler.supabase.com", "aws-0-eu-west-1.pooler.supabase.com", "aws-0-eu-central-1.pooler.supabase.com", "aws-0-ap-northeast-1.pooler.supabase.com"]:
+                candidates.append(f"postgresql://postgres.{project_ref}:{encoded}@{host}:6543/postgres?sslmode=require")
+        # direct as fallback (often IPv6, may fail on free tier)
         candidates.append(f"postgresql://postgres:{encoded}@db.{project_ref}.supabase.co:5432/postgres?sslmode=require")
     return candidates
 
