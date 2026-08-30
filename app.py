@@ -1169,7 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps(obj, indent=2).encode())
+        self.wfile.write(json.dumps(obj, indent=2, default=str).encode())
 
     def redirect(self, loc):
         self.send_response(303)
