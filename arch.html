@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Honey Chain — Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,system-ui,Arial,sans-serif;background:#f8fafc;color:#0f172a}
+.wrap{max-width:1100px;margin:0 auto;padding:28px}
+h1{font-size:26px;margin:0 0 6px;letter-spacing:-0.02em}
+.sub{color:#475569;font-size:13px;margin-bottom:18px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(15,23,42,.06)}
+.legend{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:#475569}
+.legend span{padding:6px 10px;border-radius:999px;border:1px solid #e2e8f0;background:#fff}
+.mermaid{font-size:14px}
+.note{margin-top:14px;font-size:11px;color:#64748b;line-height:1.5}
+a{color:#0ea5e9;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Honey Chain — live architecture</h1>
+  <div class="sub">One hash at the farm, one QR at the packer. SQLite keeps the demo alive, Postgres keeps the record. Queue mirrors when Supabase returns.</div>
+  <div class="card">
+    <div class="mermaid">
+flowchart TB
+  classDef client fill:#fff,stroke:#0ea5e9,stroke-width:1.6
+  classDef edge fill:#fefce8,stroke:#eab308
+  classDef cloud fill:#f0fdf4,stroke:#16a34a
+  classDef data fill:#eef2ff,stroke:#6366f1
+  classDef queue fill:#fff7ed,stroke:#f97316
+
+  PWA["Beekeeper PWA<br/><b>Expo 57 RN 0.86</b><br/>offline SQLite<br/>camera QR GPS pin"]:::client
+  WEB["Consumer Web<br/><b>Next.js 16</b><br/>QR verify rating"]:::client
+  COOP["Coop Plant<br/>pools 5 hashes pooled QR"]:::client
+
+  HIVE["Hive<br/>temp hum weight sound<br/>flag temp 35"]:::edge
+
+  API["API<br/><b>Render Python http.server</b><br/>/api/batch 201 hash SHA256"]:::cloud
+  AUTH["QR token<br/>scan_secret one-use"]:::cloud
+  AI["Health AI<br/>rules plus 3 small models"]:::cloud
+
+  PG["Supabase Postgres<br/><b>ap-northeast-1 pooler 6543</b><br/>batch pooled_lot rating"]:::data
+  LITE["SQLite fallback<br/>honeychain.db plus sync_queue"]:::queue
+  Q["sync_queue<br/>pending total<br/>POST flush-queue"]:::queue
+
+  S3["Object store<br/>photos PDFs"]:::data
+
+  PWA -->|POST batch JSON 201| API
+  PWA -->|POST hive flag| API
+  COOP -->|POST pooled| API
+  HIVE -->|telemetry| API
+  WEB -->|GET verify| API
+  WEB -->|POST rate| API
+
+  API --> PG
+  API -. fallback .-> LITE
+  LITE --> Q
+  Q -. flush when postgres ok .-> PG
+
+  API --> AUTH
+  API --> AI
+  API --> S3
+
+  PG <-->|replication| LITE
+
+  class PWA,WEB,COOP client
+  class HIVE edge
+  class API,AUTH,AI cloud
+  class PG,S3 data
+  class LITE,Q queue
+    </div>
+  </div>
+
+  <div class="legend">
+    <span>Expo PWA offline first</span>
+    <span>Render live: <a href="https://honey-chain.onrender.com">honey-chain.onrender.com</a> • <a href="https://honey-chain.onrender.com/health">/health</a></span>
+    <span>Supabase jlwgmqwhqrweumngvfqa • pooler ap-northeast-1:6543</span>
+    <span>Release <a href="https://github.com/AshutoshGitMirror/honey-chain/releases/tag/v0.1.0">v0.1.0</a> • APK 113M</span>
+  </div>
+
+  <div class="note">
+    Hash at field: <code>batch_hash(prev, beekeeper_id, hive_id, harvest_date, flower, honey_type, location)</code> <code>app.py:174</code> • Pooled: <code>pooled_hash(sorted prev_hashes|plant|date)</code> <code>app.py:178</code> • Queue: <code>SYNC_QUEUE_SQL app.py:28</code> <code>enqueue_sync app.py:107</code> <code>flush_queue app.py:120</code> <code>GET /api/queue-status app.py:844</code> • Supabase test batch <code>29e7cbbb… 2f3fbe…</code> on Postgres, not SQLite.
+  </div>
+</div>
+<script>mermaid.initialize({startOnLoad:true, theme:'base', themeVariables:{primaryColor:'#f8fafc', lineColor:'#64748b', primaryTextColor:'#0f172a'}})</script>
+</body>
+</html>
