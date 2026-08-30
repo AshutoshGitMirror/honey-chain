@@ -261,9 +261,9 @@ def init_db():
     cnt = con.execute("SELECT COUNT(*) as c FROM beekeeper").fetchone()["c"]
     if cnt == 0:
         con.execute("INSERT INTO beekeeper (name, village, experience_years, bio, upi_id, promotion_opt_in, photo_url, collective_name, latitude, longitude, site_people) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    ("Ramesh Yadav", "Nashik MH", 8, "8 years, mustard and ber honey. 12 boxes. KVIC 2019 batch.", "ramesh@ybl", 1, "https://cdn.pixabay.com/photo/2016/03/26/13/27/beekeeper-1280389_640.jpg", "Nashik Madhu Collective", 20.011, 73.790, '["Ramesh Yadav - lead","Amit Pawar - helper","KVIC trainer Sunil"]'))
+                    ("Ramesh Yadav", "Nashik MH", 8, "8 years, mustard and ber honey. 12 boxes. KVIC 2019 batch.", "ramesh@ybl", True, "https://cdn.pixabay.com/photo/2016/03/26/13/27/beekeeper-1280389_640.jpg", "Nashik Madhu Collective", 20.011, 73.790, '["Ramesh Yadav - lead","Amit Pawar - helper","KVIC trainer Sunil"]'))
         con.execute("INSERT INTO beekeeper (name, village, experience_years, bio, promotion_opt_in, collective_name, latitude, longitude, site_people) VALUES (?,?,?,?,?,?,?,?,?)",
-                    ("Sunita Devi", "Muzaffarpur BR", 5, "Litchi honey specialist. KVIC trained 2021.", 1, "Muzaffarpur Litchi Group", 26.122, 85.390, '["Sunita Devi - lead","Rajesh Kumar - harvest","Anjali - packaging"]'))
+                    ("Sunita Devi", "Muzaffarpur BR", 5, "Litchi honey specialist. KVIC trained 2021.", True, "Muzaffarpur Litchi Group", 26.122, 85.390, '["Sunita Devi - lead","Rajesh Kumar - harvest","Anjali - packaging"]'))
         con.execute("INSERT INTO beekeeper (name, village, experience_years, bio, collective_name, latitude, longitude) VALUES (?,?,?,?,?,?,?)",
                     ("Kareem Ali", "Nashik MH", 6, "Ber honey, 8 boxes near orchard.", "Nashik Madhu Collective", 20.015, 73.795))
         con.commit()
@@ -912,10 +912,10 @@ class Handler(BaseHTTPRequestHandler):
             con = db()
             is_pg = getattr(con, "is_postgres", False)
             con.execute("INSERT INTO beekeeper (name, phone, village, experience_years, bio, upi_id, promotion_opt_in, photo_url, collective_name, latitude, longitude, site_people) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (d.get("name"), d.get("phone"), d.get("village"), int(d.get("experience_years") or 0), d.get("bio"), d.get("upi_id"), int(d.get("promotion_opt_in") or 0), d.get("photo_url"), d.get("collective_name"), float(d.get("latitude") or 0) or None, float(d.get("longitude") or 0) or None, d.get("site_people")))
+                        (d.get("name"), d.get("phone"), d.get("village"), int(d.get("experience_years") or 0), d.get("bio"), d.get("upi_id"), bool(int(d.get("promotion_opt_in") or 0)), d.get("photo_url"), d.get("collective_name"), float(d.get("latitude") or 0) or None, float(d.get("longitude") or 0) or None, d.get("site_people")))
             con.commit(); con.close()
             if not is_pg:
-                enqueue_sync("beekeeper", {"name": d.get("name"), "phone": d.get("phone"), "village": d.get("village"), "experience_years": int(d.get("experience_years") or 0), "bio": d.get("bio"), "upi_id": d.get("upi_id"), "promotion_opt_in": int(d.get("promotion_opt_in") or 0), "photo_url": d.get("photo_url"), "collective_name": d.get("collective_name"), "latitude": float(d.get("latitude") or 0) or None, "longitude": float(d.get("longitude") or 0) or None, "site_people": d.get("site_people")})
+                enqueue_sync("beekeeper", {"name": d.get("name"), "phone": d.get("phone"), "village": d.get("village"), "experience_years": int(d.get("experience_years") or 0), "bio": d.get("bio"), "upi_id": d.get("upi_id"), "promotion_opt_in": bool(int(d.get("promotion_opt_in") or 0)), "photo_url": d.get("photo_url"), "collective_name": d.get("collective_name"), "latitude": float(d.get("latitude") or 0) or None, "longitude": float(d.get("longitude") or 0) or None, "site_people": d.get("site_people")})
             else:
                 try:
                     flush_queue()
@@ -927,7 +927,7 @@ class Handler(BaseHTTPRequestHandler):
                 bid = int(path.split("/")[3])
                 con = db()
                 con.execute("UPDATE beekeeper SET photo_url=?, collective_name=?, latitude=?, longitude=?, site_people=?, promotion_opt_in=? WHERE id=?",
-                            (d.get("photo_url") or None, d.get("collective_name") or None, float(d.get("latitude") or 0) or None, float(d.get("longitude") or 0) or None, d.get("site_people"), int(d.get("promotion_opt_in") or 0), bid))
+                            (d.get("photo_url") or None, d.get("collective_name") or None, float(d.get("latitude") or 0) or None, float(d.get("longitude") or 0) or None, d.get("site_people"), bool(int(d.get("promotion_opt_in") or 0)), bid))
                 con.commit(); con.close()
                 self.redirect(f"/beekeeper/{bid}")
             except Exception as e:
@@ -936,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 bid = int(path.split("/")[3])
                 con = db()
-                con.execute("UPDATE beekeeper SET promotion_opt_in=? WHERE id=?", (int(d.get("promotion_opt_in") or 0), bid))
+                con.execute("UPDATE beekeeper SET promotion_opt_in=? WHERE id=?", (bool(int(d.get("promotion_opt_in") or 0)), bid))
                 con.commit(); con.close()
                 self.redirect(f"/beekeeper/{bid}")
             except Exception as e:
